@@ -87,7 +87,7 @@ The settled list of subjects for a job — who is in the clip, what each is pair
 _Avoid_: face list, track list, plan file (that's where it lives, not what it is)
 
 **Excluded face**:
-A face found at the match frame that the user has switched off, so it never becomes a subject and keeps its original pixels.
+A face found at the match frame that the user has switched off, so it never becomes a subject and keeps its original pixels. Named per plate in `excluded_faces`: a bare number is a target clip face, an `s`-prefixed one a reference still face - the only way to switch off a bystander the photo saw and the clip never did.
 _Avoid_: disabled face, ignored face, skipped track
 
 **Unpaired face**:

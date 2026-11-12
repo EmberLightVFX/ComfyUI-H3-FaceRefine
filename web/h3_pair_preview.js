@@ -234,7 +234,9 @@ function render(d, data, node) {
         d.body.appendChild(el("h4", "h3pp-sect",
             "excluded - switched off, so they keep their original pixels"));
         d.body.appendChild(chips(data.excluded_faces, "off",
-            (i) => "clip face " + i + " (the excluded_faces widget)"));
+            (i) => (typeof i === "string" && i[0] === "s"
+                ? "reference still face " + i.slice(1)
+                : "clip face " + i) + " (the excluded_faces widget)"));
     }
     if ((data.left_out || []).length) {
         d.body.appendChild(el("h4", "h3pp-sect",

@@ -75,6 +75,12 @@ REF_KINDS = (REF_CROP, REF_STILL, REF_NONE)
 # 16:9 against 4:3 does not.
 ASPECT_TOLERANCE = 0.01
 
+# How an exclusion names a face on the REFERENCE STILL instead of the target clip: ``s2``. A bare
+# number has always been a clip face, and `union` seeding makes a subject of a face only the photo
+# ever saw - so without a second numbering (spec story 6's bystander) that subject could never be
+# switched off.
+STILL_FACE_PREFIX = "s"
+
 # The tracker's defaults, mirrored so the plan can record the rectangle the tracker
 # WOULD use before any pass has run. `crop_factor` and `canvas_mode="manual"` 768x768
 # are `H3FaceTrackCrop`'s shipped defaults (nodes.py:1031, nodes.py:1043).
@@ -417,12 +423,24 @@ def overlapping_subject_pairs(plan, threshold: float = DEFAULT_OVERLAP_THRESHOLD
 # the excluded_faces widget
 # ----------------------------------------------------------------------------
 
-def parse_excluded_faces(value) -> list[int]:
-    """Read the excluded_faces widget: ``"2, 5"`` -> ``[2, 5]``, empty -> ``[]``.
+def _digits(text: str) -> bool:
+    """``"12"`` / ``"-3"`` -> True, ``""`` / ``"s2"`` / ``" bystander"`` -> False."""
+    body = text[1:] if text.startswith("-") else text
+    return bool(body) and all(char.isdigit() for char in body)
+
+
+def parse_excluded_faces(value) -> list:
+    """Read the excluded_faces widget: ``"2, s5"`` -> ``[2, "s5"]``, empty -> ``[]``.
 
     A typed widget rather than a front end: the numbers are the ones printed on the pairing
     preview, so switching a face off is a text edit, and text edits travel with the saved
     workflow.
+
+    A bare number names a face on the **target clip** - the numbering it has always had. An
+    ``s``-prefixed one names a face on the **reference still**, which is the only way to switch
+    off a bystander the photo saw and the clip never did: with the shipped ``union`` seeding such
+    a face becomes a subject, and a subject with no clip face has no clip number to switch it
+    off with.
     """
     if value is None:
         return []
@@ -430,7 +448,7 @@ def parse_excluded_faces(value) -> list[int]:
         chunks: list = list(value)
     else:
         chunks = str(value).replace(";", ",").replace("/", ",").split(",")
-    out: list[int] = []
+    out: list = []
     for chunk in chunks:
         if isinstance(chunk, (int, float)) and not isinstance(chunk, bool):
             out.append(int(chunk))
@@ -438,29 +456,78 @@ def parse_excluded_faces(value) -> list[int]:
         text = str(chunk).strip()
         if not text:
             continue
+        if text[0] in ("s", "S"):
+            tail = text[1:]
+            if _digits(tail):
+                out.append(STILL_FACE_PREFIX + tail)
+                continue
         try:
             out.append(int(text))
         except ValueError:
             raise ValueError(
                 f"excluded_faces has to be comma-separated face numbers, like '0, 3' - "
-                f"{text!r} is not one. The numbers are the ones printed on the pairing "
-                f"preview."
+                f"{text!r} is not one. A bare number is a target clip face; a reference still "
+                f"face is written with an s, like 's2'. The numbers are the ones printed on "
+                f"the pairing preview."
             ) from None
     return out
 
 
-def _checked_excluded(parsed, n_target: int, match_frame: int) -> list[int]:
-    """Exclusions sorted, deduplicated, and checked against the faces actually found."""
-    unique = sorted({int(i) for i in parsed})
-    for i in unique:
+def exclusion_plates(excluded) -> tuple[list[int], list[int]]:
+    """An exclusion list split into ``(target clip faces, reference still faces)``.
+
+    Downstream - the preview, the report, the chips - each plate has to be counted and named
+    separately, and none of them should have to re-read the ``s`` prefix for itself.
+    """
+    clip: list[int] = []
+    still: list[int] = []
+    for item in excluded or []:
+        if isinstance(item, str):
+            still.append(int(item[1:]))
+        else:
+            clip.append(int(item))
+    return clip, still
+
+
+def _checked_excluded(parsed, n_target: int, n_still: int,
+                      match_frame: int) -> list:
+    """Exclusions sorted, deduplicated, and checked against the faces actually found.
+
+    Each one is checked against the plate it names, so an out-of-range ``s2`` says the reference
+    still only had two faces rather than blaming a clip it was never pointing at.
+    """
+    clip, still = exclusion_plates(parsed)
+    clip, still = sorted(set(clip)), sorted(set(still))
+    for i in clip:
         if i < 0 or i >= n_target:
             raise ValueError(
-                f"excluded_faces names face {i} on the target clip, but only {n_target} "
-                f"face(s) were found there on frame {match_frame}. The numbers come from "
-                f"the pairing preview, so re-read them after changing detector, "
-                f"confidence or match_frame."
+                f"excluded_faces names target clip face {i}, but only {n_target} face(s) "
+                f"were found on the target clip on frame {match_frame}. A reference still "
+                f"face is written s{i}. The numbers come from the pairing preview, so "
+                f"re-read them after changing detector, confidence or match_frame."
             )
-    return unique
+    for j in still:
+        if j < 0 or j >= n_still:
+            raise ValueError(
+                f"excluded_faces names reference still face {j}, but only {n_still} face(s) "
+                f"were found on the reference still on frame {match_frame}, so the reference "
+                f"still faces run 0-{max(0, n_still - 1)}. A target clip face is written {j} "
+                f"without the s. The numbers come from the pairing preview, so re-read them "
+                f"after changing detector, confidence or match_frame."
+            )
+    return clip + [STILL_FACE_PREFIX + str(j) for j in still]
+
+
+def describe_exclusions(excluded) -> str:
+    """The exclusions as one readable run-on: ``clip face(s) 1, reference still face(s) s2``."""
+    clip, still = exclusion_plates(excluded)
+    named = []
+    if clip:
+        named.append("clip face(s) " + ", ".join(str(i) for i in clip))
+    if still:
+        named.append("reference still face(s) "
+                     + ", ".join(STILL_FACE_PREFIX + str(j) for j in still))
+    return ", ".join(named)
 
 
 def _confs(values, n: int) -> list[float]:
@@ -512,7 +579,9 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
 
     Every subject records whether it has a **subject reference** and, when it does, the
     rectangle it gets cut with and its `ref_kind` (`crop`, `still` or `none`). `excluded` names
-    faces on the target clip to switch off; their partner on the other plate goes with them.
+    faces to switch off - a bare number on the target clip, `s2` on the reference still - and the
+    face paired to each one goes with it, so the person it was matched to falls to whatever
+    `unmatched_faces` says.
     `max_subjects` (0 = no cap) is recorded for later passes to act on, not applied here.
 
     `unmatched_faces` decides what becomes of a face that found no partner on the other plate:
@@ -553,8 +622,10 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     still = _face_array(still_boxes, "reference still faces")
     clip_confs = _confs(target_confs, len(clip))
     still_confs = _confs(still_confs, len(still))
-    excluded_faces = _checked_excluded(parse_excluded_faces(excluded), len(clip), frame)
-    off = set(excluded_faces)
+    excluded_faces = _checked_excluded(parse_excluded_faces(excluded), len(clip),
+                                       len(still), frame)
+    off_clip, off_still = exclusion_plates(excluded_faces)
+    off_clip, off_still = set(off_clip), set(off_still)
 
     pairing = pair_faces(clip, still, (tw, th), (sw, sh), tolerance)
     scale = pairing["scale"]
@@ -564,15 +635,17 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
 
     if subject_source == "target_clip":
         seeds: list[tuple[str, int]] = [("clip", i) for i in range(len(clip))
-                                        if i not in off]
+                                        if i not in off_clip]
     elif subject_source == "reference_still":
         seeds = [("still", j) for j in range(len(still))
-                 if target_of.get(j) is None or target_of[j] not in off]
+                 if j not in off_still
+                 and (target_of.get(j) is None or target_of[j] not in off_clip)]
     else:
         # A still face that found a partner is already represented by that partner, so
         # union adds only the faces the clip never saw.
-        seeds = ([("clip", i) for i in range(len(clip)) if i not in off]
-                 + [("still", j) for j in pairing["unpaired_still"]])
+        seeds = ([("clip", i) for i in range(len(clip)) if i not in off_clip]
+                 + [("still", j) for j in pairing["unpaired_still"]
+                    if j not in off_still])
 
     def left_to_right(seed: tuple[str, int]) -> tuple:
         kind, i = seed
@@ -588,6 +661,13 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     for index, (kind, i) in enumerate(sorted(seeds, key=left_to_right)):
         clip_face = i if kind == "clip" else target_of.get(i)
         still_face = still_of.get(i) if kind == "clip" else i
+        # A face switched off on either plate cannot hold up a pair: the person it was matched to
+        # loses its partner and falls to whatever `unmatched_faces` says, which is what switching
+        # one detection off has to mean.
+        if clip_face in off_clip:
+            clip_face = None
+        if still_face in off_still:
+            still_face = None
         subject = {
             "index": index,
             "clip_face": clip_face,

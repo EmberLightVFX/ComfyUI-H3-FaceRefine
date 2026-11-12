@@ -223,7 +223,10 @@ def preview_state(job_name) -> dict:
     state["pairs"] = plan.get("pairs") or []
     state["unpaired_target"] = plan.get("unpaired_target") or []
     state["unpaired_still"] = plan.get("unpaired_still") or []
-    state["excluded_faces"] = [int(i) for i in (plan.get("excluded_faces") or [])]
+    # Kept as the plan wrote them: a bare number is a target clip face, an `s` prefix a reference
+    # still face. Coercing to int here would throw away which plate was named.
+    state["excluded_faces"] = [str(i) if isinstance(i, str) else int(i)
+                               for i in (plan.get("excluded_faces") or [])]
     state["subject_count"] = int(plan.get("subject_count") or len(plan.get("subjects") or []))
     state["subjects"] = [_subject_row(root, job, s) for s in (plan.get("subjects") or [])]
     # The faces the plan took out of the subject set, named rather than counted: `leave` (#8)

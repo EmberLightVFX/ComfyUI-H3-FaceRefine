@@ -289,6 +289,72 @@ def test_the_excluded_faces_widget_is_read_as_a_typed_list():
     assert "bystander" in str(exc.value)
 
 
+# --- an exclusion can name a face on EITHER plate (#11 review, P4; spec story 6) ------
+
+def test_an_s_index_is_a_reference_still_face_and_a_bare_number_is_a_clip_face():
+    """Two plates, two numberings, and one widget. `s2` is the still's face 2 as numbered on the
+    pairing preview; a bare 2 stays the clip's face 2, exactly as it always was."""
+    assert ps.parse_excluded_faces("2, s3, s1, 0") == [2, "s3", "s1", 0]
+    assert ps.parse_excluded_faces("S1") == ["s1"]
+    assert ps.parse_excluded_faces(["s0", 1]) == ["s0", 1]
+    with pytest.raises(ValueError) as exc:
+        ps.parse_excluded_faces("ss2")
+    assert "ss2" in str(exc.value)
+
+
+def test_an_s_index_switches_off_a_face_only_the_reference_still_saw():
+    """Spec story 6: `union` seeds every face on either plate, so a bystander who is in the photo
+    and never in the clip became a subject that could not be switched off. `s2` switches it off."""
+    still = STILL_BOXES + [[1800, 1800, 1900, 1900]]      # a face the clip never saw
+
+    kept = _plan(still_boxes=still, unmatched_faces="no_reference")
+    off = _plan(still_boxes=still, unmatched_faces="no_reference", excluded=["s2"])
+
+    assert 2 in [s["still_face"] for s in kept["subjects"]]
+    assert 2 not in [s["still_face"] for s in off["subjects"]]
+    assert off["subject_count"] == kept["subject_count"] - 1
+    # Both kinds land in the plan and in the fingerprint, and the still one stays a still one.
+    assert off["excluded_faces"] == ["s2"]
+    assert off["inputs"]["excluded_faces"] == ["s2"]
+
+
+def test_an_s_index_on_a_paired_face_drops_the_pair_it_belongs_to():
+    """A switched-off detection cannot pair, so the person it was matched to falls to whatever
+    `unmatched_faces` says - which is what switching a face off has to mean."""
+    plan = _plan(excluded=["s0"], unmatched_faces="no_reference")
+
+    assert [(s["clip_face"], s["still_face"]) for s in plan["subjects"]] == [(0, 1), (1, None),
+                                                                            (2, None)]
+    assert plan["subjects"][2]["ref_kind"] == ps.REF_NONE
+
+
+def test_an_out_of_range_index_names_the_plate_it_was_checked_against():
+    """`s9` against a two-face still and a bare 9 against a three-face clip are different
+    mistakes; each message says which plate was counted and how to name the other one."""
+    with pytest.raises(ValueError) as exc:
+        _plan(excluded=["s2"])
+    message = str(exc.value)
+    assert "reference still face 2" in message and "0-1" in message
+
+    with pytest.raises(ValueError) as exc:
+        _plan(excluded=["s-1"])
+    assert "reference still face -1" in str(exc.value)
+
+    with pytest.raises(ValueError) as exc:
+        _plan(excluded=[9])
+    assert "target clip face 9" in str(exc.value)
+    assert "s9" in str(exc.value)
+
+
+def test_a_bare_index_still_means_the_target_clip_exactly_as_before():
+    """Nothing about the released behaviour moves: the same exclusions, the same plan."""
+    plan = _plan(excluded=[1])
+
+    assert [s["clip_face"] for s in plan["subjects"]] == [0, 2]
+    assert plan["excluded_faces"] == [1] and plan["inputs"]["excluded_faces"] == [1]
+    assert _plan(excluded=[1])["subjects"] == plan["subjects"]
+
+
 def test_max_subjects_is_recorded_and_applied():
     """#10 reversed this test. The cap is not decoration: it truncates the ordered subject set
     here, so every downstream stage - the subject combo, `next`, the manifest, the composite
@@ -395,6 +461,21 @@ def test_the_plan_round_trips_through_the_job_folder(tmp_path):
     written = ps.write_plan(job, plan)
     assert os.path.basename(written) == ps.PLAN_FILENAME
     assert ps.read_plan(job) == plan
+
+def test_an_exclusion_of_either_plate_round_trips_and_stays_its_own_job(tmp_path):
+    """`s` tokens are JSON like any other, and the fingerprint tells an `s2` job from a 2 job -
+    otherwise a resume would read a still-side switch-off as a clip-side one."""
+    mixed = _plan(excluded=["s2", 1], still_boxes=STILL_BOXES + [[1800, 1800, 1900, 1900]],
+                  unmatched_faces="no_reference")
+    job = ps.job_dir_for(tmp_path, "bystanders")
+    ps.write_plan(job, mixed)
+    back = ps.read_plan(job)
+
+    assert back == mixed
+    assert back["excluded_faces"] == [1, "s2"] == back["inputs"]["excluded_faces"]
+    assert ps.pairing_fingerprint(back) == ps.pairing_fingerprint(mixed)
+    assert ps.fingerprint_difference(back, _plan(excluded=[2])) != []
+
 
 
 def test_a_written_plan_carries_a_version_even_when_nobody_mentioned_one(tmp_path):

@@ -205,18 +205,24 @@ def _pairing_preview(clip_frame, still_frame, clip_boxes, still_boxes, plan):
             clip_colour[int(subject["clip_face"])] = colour
         if subject["still_face"] is not None:
             still_colour[int(subject["still_face"])] = colour
-    for face in plan["excluded_faces"]:
+    # The exclusions are per plate: a bare number strikes through the clip's face, an `s` number
+    # the still's. Striking both at the same index would say a bystander had been switched off on
+    # a plate that never had that face at all.
+    off_clip, off_still = plan_store.exclusion_plates(plan["excluded_faces"])
+    for face in off_clip:
         clip_colour[int(face)] = _EXCLUDED_COLOUR
+    for face in off_still:
+        still_colour[int(face)] = _EXCLUDED_COLOUR
 
-    excluded = {int(i) for i in plan["excluded_faces"]}
-    for plate, boxes, colours, scale in ((clip_plate, clip_boxes, clip_colour, 1.0),
-                                         (still_plate, still_boxes, still_colour,
-                                          float(plan["scale"]))):
+    for plate, boxes, colours, scale, off in ((clip_plate, clip_boxes, clip_colour, 1.0,
+                                               set(off_clip)),
+                                              (still_plate, still_boxes, still_colour,
+                                               float(plan["scale"]), set(off_still))):
         for i, box in enumerate(boxes):
             x0, y0, x1, y1 = (float(v) * scale for v in box[:4])
             colour = colours.get(i, _UNSEEDED_COLOUR)
             _draw_rect(plate, x0, y0, x1, y1, colour, thick * (2 if i in colours else 1))
-            if i in excluded:
+            if i in off:
                 _draw_slash(plate, x0, y0, x1, y1, colour, thick)
             _draw_label(plate, x0, max(0.0, y0 - label_h), str(i), glyph,
                         (0.0, 0.0, 0.0), colour)
@@ -271,7 +277,7 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
     if plan["excluded_faces"]:
         lines.append(_line(
             "excluded",
-            f"clip face(s) {', '.join(str(i) for i in plan['excluded_faces'])}"
+            f"{plan_store.describe_exclusions(plan['excluded_faces'])}"
             f" - switched off, so they keep their original pixels"))
     else:
         lines.append(_line("excluded", "none"))
@@ -375,10 +381,14 @@ class H3MultiFacePlan:
                                "clip; lower it in a crowd."}),
                 "excluded_faces": ("STRING", {
                     "default": "", "multiline": False,
-                    "tooltip": "Clip face numbers to switch off, comma-separated, exactly as "
-                               "numbered on this node's preview: 0, 3. An excluded face never "
-                               "becomes a subject and keeps its original pixels. A text "
-                               "widget, so it survives a reload with no front end."}),
+                    "tooltip": "Face numbers to switch off, comma-separated, exactly as "
+                               "numbered on this node's preview: 0, 3. A bare number is a "
+                               "TARGET CLIP face; s2 is a REFERENCE STILL face - the only way "
+                               "to switch off a bystander the photo saw and the clip never "
+                               "did. An excluded face never becomes a subject and keeps its "
+                               "original pixels, and the face paired to it falls to "
+                               "unmatched_faces. A text widget, so it survives a reload with "
+                               "no front end."}),
                 "max_subjects": ("INT", {
                     "default": 0, "min": 0, "max": 64, "step": 1,
                     "tooltip": "0 = no cap. The cap is recorded in the plan for the passes to "
@@ -506,7 +516,7 @@ class H3MultiFacePlan:
             if plan["excluded_faces"]:
                 raise ValueError(
                     f"nothing to plan: every face found on frame {frame} is named in "
-                    f"excluded_faces ({', '.join(str(i) for i in plan['excluded_faces'])}). "
+                    f"excluded_faces ({plan_store.describe_exclusions(plan['excluded_faces'])}). "
                     f"Clear the numbers that are not bystanders.")
             if plan["left_out"]:
                 # `leave` spent the whole job. Empty is not an answer anyone wants to queue,
