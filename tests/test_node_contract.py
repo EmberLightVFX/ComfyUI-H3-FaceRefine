@@ -20,7 +20,8 @@ import plan_store as ps
 PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 WIDGET_ORDER = ["detector", "confidence", "match_frame", "subject_source",
-                "match_tolerance", "excluded_faces", "max_subjects", "job_name"]
+                "match_tolerance", "excluded_faces", "max_subjects", "job_name",
+                "unmatched_faces"]
 
 SUBJECT_WIDGET_ORDER = ["subject"]
 
@@ -71,7 +72,7 @@ def test_the_plates_are_images_and_every_widget_is_a_typed_one():
     assert schema["reference_still"][0] == "IMAGE"
     for name in WIDGET_ORDER:
         choice = schema[name][0]
-        if name in ("detector", "subject_source"):
+        if name in ("detector", "subject_source", "unmatched_faces"):
             # A combo has to offer options, or the prompt fails validation on load.
             assert isinstance(choice, (list, tuple)) and len(choice) > 0, name
         else:
@@ -90,6 +91,20 @@ def test_the_widget_defaults_are_what_the_feature_promises():
     assert schema["job_name"][1]["default"] == ""        # derived from the clip
     assert schema["confidence"][1]["default"] == 0.35    # the pack's detector floor
     assert schema["detector"][0]                        # a combo always needs an option
+    # #8: what to do with a face that found no partner. `leave` is the default because an
+    # unrefined face is a smaller mistake than a refined one wearing the wrong person's face.
+    assert list(schema["unmatched_faces"][0]) == list(ps.UNMATCHED_FACES)
+    assert ps.DEFAULT_UNMATCHED_FACES == "leave"
+    assert schema["unmatched_faces"][1]["default"] == ps.DEFAULT_UNMATCHED_FACES
+
+
+def test_the_plan_run_takes_its_inputs_in_schema_order():
+    """ComfyUI calls FUNCTION with the required inputs positionally. `unmatched_faces` sits at
+    the END of both lists, which is the only place a new widget may go (ADR 0002)."""
+    schema = m.H3MultiFacePlan.INPUT_TYPES()
+    args = [p for p in inspect.signature(m.H3MultiFacePlan.run).parameters if p != "self"]
+    assert args == list(schema["required"])
+    assert args[-1] == "unmatched_faces"
 
 
 def test_the_subject_node_is_registered_in_its_own_module():

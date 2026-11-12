@@ -255,3 +255,28 @@ def test_a_payload_that_is_not_crop_positions_is_refused_rather_than_guessed():
     with pytest.raises(ValueError) as exc:
         ps.shot_account(_plan(), 0, transform=["not", "a", "payload"])
     assert "crop positions" in str(exc.value)
+
+
+def test_a_subject_with_no_subject_reference_is_worded_for_that_not_for_a_missing_partner():
+    """#8: an unpaired subject has no subject reference, and that is a reason of its own for a
+    shot holding nobody. The account must say so instead of talking about pairing partners:
+    there is no partner to find, so that wording sends the user off to fix something that is
+    already settled."""
+    plan = _plan()
+    subject = plan["subjects"][0]
+    subject["still_face"] = None
+    subject["paired"] = False
+    subject["has_reference"] = False
+    subject["ref_kind"] = "none"
+
+    transform = _transform([False] * 6 + [True] * 6, [True] * 6 + [False] * 6,
+                           segments=[(0, 6), (6, 12)])
+    account = ps.absence_account(plan, 0, transform=transform, pick=_pick([False, True]))
+
+    assert account["absent_planned"] == [2]
+    reason = account["shots"][1]["reason"]
+    assert "no subject reference" in reason
+    text = "\n".join(account["lines"])
+    assert "partner" not in text
+    # And it stays actionable: the widget that would change it is named.
+    assert "unmatched_faces" in text
