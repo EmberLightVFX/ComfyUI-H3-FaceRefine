@@ -28,6 +28,24 @@ PLAN_FILENAME = "plan.json"
 
 SUBJECT_SOURCES = ("target_clip", "reference_still", "union")
 
+# What to do with a face that found no partner on the other plate (#8). This belongs to the PLAN
+# and not to any single pass because it decides the SUBJECT SET, and the subject set is what the
+# whole downstream chain is gated on: the composite needs a stitched pass for every subject in
+# the plan, and the pairing fingerprint compares the subject set to keep two pairings out of one
+# job folder. Deciding it once here means "who is a subject" is answered in `plan.json`.
+UNMATCHED_FACES = ("leave", "no_reference", "with_still")
+DEFAULT_UNMATCHED_FACES = "leave"
+
+# What kind of subject reference a subject has, so no pass has to infer it from whether
+# `ref_crop` happens to be set:
+#   crop   cut out of the still with `crop_rect_for_reference`, at the still's native pixels;
+#   still  the WHOLE reference still - the face was never resolved in it, so there is nothing
+#          to cut (#8, `unmatched_faces=with_still`);
+#   none   no subject reference at all: the pass runs with nothing wired into H3's reference
+#          slots, which is legal because those slots autogrow from zero.
+REF_CROP, REF_STILL, REF_NONE = "crop", "still", "none"
+REF_KINDS = (REF_CROP, REF_STILL, REF_NONE)
+
 # How far the two plates' aspect ratios may drift before pairing calls it a different
 # framing. Rounding of one true aspect (1080 against 1088) sits well inside this;
 # 16:9 against 4:3 does not.
@@ -413,7 +431,8 @@ def _confs(values, n: int) -> list[float]:
 def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
                        target_size, still_size, match_frame: int = 0,
                        subject_source: str = "union", tolerance: float = 0.05,
-                       excluded=(), max_subjects: int = 0) -> dict:
+                       excluded=(), max_subjects: int = 0,
+                       unmatched_faces: str = DEFAULT_UNMATCHED_FACES) -> dict:
     """Settle who the subjects of this job are, as a plain JSON-serialisable dict.
 
     Both plates were detected on the match frame, so pairing is the positional kind
@@ -424,9 +443,19 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     * ``union`` (the default) - every face found on either plate.
 
     Every subject records whether it has a **subject reference** and, when it does, the
-    rectangle it gets cut with. `excluded` names faces on the target clip to switch off;
-    their partner on the other plate goes with them. `max_subjects` (0 = no cap) is
-    recorded for later passes to act on, not applied here.
+    rectangle it gets cut with and its `ref_kind` (`crop`, `still` or `none`). `excluded` names
+    faces on the target clip to switch off; their partner on the other plate goes with them.
+    `max_subjects` (0 = no cap) is recorded for later passes to act on, not applied here.
+
+    `unmatched_faces` decides what becomes of a face that found no partner on the other plate:
+
+    * ``leave`` (the default) - it is not made a subject at all, so no pass ever touches it and
+      it keeps its original pixels. Recorded in ``left_out`` so the report can name it.
+    * ``no_reference`` - it becomes a subject with no subject reference, and its pass runs with
+      nothing wired into H3's reference slots.
+    * ``with_still`` - it becomes a subject whose subject reference is the whole reference still.
+
+    A face that found a partner is identical in all three modes.
     """
     tw, th, sw, sh, _scale = _plates(target_size, still_size)
     if subject_source not in SUBJECT_SOURCES:
@@ -434,6 +463,13 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
             f"subject_source must be one of {' | '.join(SUBJECT_SOURCES)}, got "
             f"{subject_source!r}. target_clip seeds the subjects from the clip, "
             f"reference_still from the reference still, union from both."
+        )
+    if unmatched_faces not in UNMATCHED_FACES:
+        raise ValueError(
+            f"unmatched_faces must be one of {' | '.join(UNMATCHED_FACES)}, got "
+            f"{unmatched_faces!r}. leave does not make a subject of a face that found no "
+            f"partner, so it keeps its original pixels; no_reference makes one with no subject "
+            f"reference; with_still makes one conditioned on the whole reference still."
         )
     frame = int(match_frame)
     if frame < 0:
@@ -493,11 +529,13 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
             "paired": clip_face is not None and still_face is not None,
             "has_reference": still_face is not None,
             "ref_crop": None,
+            "ref_kind": REF_NONE,
             # Filled in by the node once the crop has actually been written out, so no
             # later pass has to load the still again.
             "ref_file": None,
         }
         if subject["has_reference"]:
+            subject["ref_kind"] = REF_CROP
             if clip_face is not None:
                 # The same rectangle the tracker would crop this face with, in the still's
                 # pixels at the still's native resolution.
@@ -508,8 +546,34 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
                 # face at the same crop_factor.
                 subject["ref_crop"] = crop_rect_for_reference(
                     tracker_rect(still[still_face], (sw, sh)), (sw, sh), (sw, sh))
+        elif unmatched_faces == "with_still":
+            # Nothing to cut: this face was never resolved in the still, so there is no
+            # rectangle to map into it. `crop_rect_for_reference` is for CUT references and is
+            # deliberately not used here - the reference is the whole still, at the still's own
+            # pixels, and the pass is conditioned on the whole frame instead of on a face.
+            subject["has_reference"] = True
+            subject["ref_kind"] = REF_STILL
+            subject["ref_crop"] = [0, 0, int(sw), int(sh)]
         subjects.append(subject)
 
+    # `leave` takes the unpaired faces out of the subject set altogether, and records them
+    # separately: they are not subjects, so they get no pass, no reference file and no number -
+    # but the report has to name every one of them, or a face quietly missing from the finished
+    # clip looks like a bug in the refinement rather than the safe default working.
+    left_out: list[dict] = []
+    if unmatched_faces == "leave":
+        kept = []
+        for subject in subjects:
+            if subject["has_reference"]:
+                kept.append(subject)
+            else:
+                subject["index"] = None      # left out of the job, so it has no subject number
+                left_out.append(subject)
+        subjects = kept
+    # Renumbered after any leaving, so the subject set stays contiguous: passes, the manifest
+    # keys, the reference file names and the composite order all count on that.
+    for index, subject in enumerate(subjects):
+        subject["index"] = index
     return {
         "version": PLAN_VERSION,
         "match_frame": frame,
@@ -520,6 +584,7 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
             "subject_source": subject_source,
             "match_tolerance": float(tolerance),
             "excluded_faces": excluded_faces,
+            "unmatched_faces": str(unmatched_faces),
             "max_subjects": int(max_subjects or 0),
         },
         # What the match frame measured, kept so a later pass can rebuild one subject's
@@ -536,8 +601,101 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
         "excluded_faces": excluded_faces,
         "subjects": subjects,
         "subject_count": len(subjects),
+        # Faces `unmatched_faces=leave` took out of the subject set. Not subjects, so no pass
+        # ever runs for them - which is why they keep their original pixels.
+        "left_out": left_out,
     }
 
+
+
+# ----------------------------------------------------------------------------
+# who each subject is, and what the report says about the faces that found no partner (#8)
+# ----------------------------------------------------------------------------
+
+KIND_PAIRED = "paired"
+KIND_NO_REFERENCE = "unpaired_no_reference"
+KIND_WHOLE_STILL = "unpaired_whole_still"
+KIND_LEFT_OUT = "left_out"
+
+
+def subject_kind(subject) -> str:
+    """Which kind of subject this entry is, in one word.
+
+    ``paired`` has a subject reference of its own - a crop of the face the still resolved at the
+    same place as the clip's; ``unpaired_no_reference`` is a subject with nothing in H3's
+    reference slots; ``unpaired_whole_still`` is a subject conditioned on the whole reference
+    still. The fourth kind, ``left_out``, never reaches a pass at all, so it is counted from
+    ``plan["left_out"]`` rather than from a subject entry.
+    """
+    entry = subject or {}
+    if entry.get("ref_kind") == REF_STILL:
+        return KIND_WHOLE_STILL
+    if entry.get("has_reference"):
+        return KIND_PAIRED
+    return KIND_NO_REFERENCE
+
+
+def subject_kind_counts(plan) -> dict:
+    """How many subjects of each kind this plan holds, plus how many faces were left out."""
+    counts = {KIND_PAIRED: 0, KIND_NO_REFERENCE: 0, KIND_WHOLE_STILL: 0, KIND_LEFT_OUT: 0}
+    for subject in (plan or {}).get("subjects") or []:
+        counts[subject_kind(subject)] += 1
+    counts[KIND_LEFT_OUT] = len((plan or {}).get("left_out") or [])
+    return counts
+
+
+def _face_position(subject, frame) -> str:
+    """Where this face was on the match frame, in the clip's pixels - the numbers the user can
+    read straight off the pairing preview."""
+    entry = subject or {}
+    where = f"frame {frame}" if frame is not None else "the match frame"
+    box = entry.get("clip_box")
+    if not box:
+        return f"a face the clip never saw on {where}"
+    cx = int(round((float(box[0]) + float(box[2])) / 2.0))
+    cy = int(round((float(box[1]) + float(box[3])) / 2.0))
+    return f"clip face {int(entry['clip_face'])} (at {cx}, {cy} on {where})"
+
+
+def unmatched_lines(plan) -> list:
+    """The sentences about faces that found no partner, one per face or subject.
+
+    Built here and not in the node module for the reason #6 found: the words a user reads are
+    the deliverable, so CI pins them. `leave` in particular has to say out loud that leaving is
+    not a failure - otherwise the safe default reads like a pairing bug.
+    """
+    inputs = (plan or {}).get("inputs") or {}
+    mode = str(inputs.get("unmatched_faces") or DEFAULT_UNMATCHED_FACES)
+    frame = (plan or {}).get("match_frame")
+    lines: list[str] = []
+    if mode == "leave":
+        for subject in (plan or {}).get("left_out") or []:
+            lines.append(
+                f"{_face_position(subject, frame)} found no partner in the reference still, so "
+                f"it is not a subject at all: unmatched_faces=leave - no pass runs for it and "
+                f"its original pixels are kept. That is not a failure: it is the safe default "
+                f"when the pairing might be wrong.")
+    elif mode == "no_reference":
+        for subject in (plan or {}).get("subjects") or []:
+            if subject_kind(subject) != KIND_NO_REFERENCE:
+                continue
+            lines.append(
+                f"{_face_position(subject, frame)} is subject {subject['index']} with no "
+                f"subject reference: unmatched_faces=no_reference runs its pass with nothing "
+                f"wired into H3's reference slots, so the refinement is driven by identity and "
+                f"quality only and will be weaker than a paired subject.")
+    elif mode == "with_still":
+        sw, sh = (inputs.get("still_size") or [0, 0])[:2]
+        for subject in (plan or {}).get("subjects") or []:
+            if subject_kind(subject) != KIND_WHOLE_STILL:
+                continue
+            lines.append(
+                f"{_face_position(subject, frame)} is subject {subject['index']} with the whole "
+                f"reference still as its subject reference ({int(sw)}x{int(sh)}px): "
+                f"unmatched_faces=with_still, so the conditioning is whole-frame and H3 chooses "
+                f"which face in the still it applies to - not a guarantee the right face is "
+                f"used.")
+    return lines
 
 
 # ----------------------------------------------------------------------------
@@ -1002,7 +1160,7 @@ def read_positions(job_dir, subject) -> dict:
 # compared whatever the widgets say.
 
 PAIRING_INPUT_FIELDS = ("target_size", "still_size", "match_frame", "subject_source",
-                        "match_tolerance", "excluded_faces")
+                        "match_tolerance", "excluded_faces", "unmatched_faces")
 
 
 def _normalise(value):
@@ -1025,10 +1183,12 @@ def _normalise(value):
 def pairing_fingerprint(plan) -> dict:
     """The part of a plan that says WHICH pairing this job was planned on.
 
-    Both plate sizes, the match frame, the seeding plate, the tolerance, the exclusions, and
-    the subject set itself - index, clip face and still face for every subject. The subject
-    set is in here because it is what actually breaks: a re-detect that pairs someone else at
-    the same widgets is still a different job.
+    Both plate sizes, the match frame, the seeding plate, the tolerance, the exclusions, what was
+    decided about faces that found no partner, and the subject set itself - index, clip face and
+    still face for every subject. The subject set is in here because it is what actually breaks:
+    a re-detect that pairs someone else at the same widgets is still a different job.
+    `unmatched_faces` is in here for the same reason (#8): it does not re-run the pairing, it
+    decides which of the paired faces become subjects at all.
     """
     inputs = (plan or {}).get("inputs") or {}
     record = {}
@@ -1136,6 +1296,14 @@ ABSENT_ACTION = ("original pixels are kept there, which is the intended result f
                  "reference still, or name them with Pick faces")
 LOST_ACTION = ("the tracker stopped finding them there - check identity_track and "
                "identity_threshold, or lower confidence, on H3 Face Track + Crop")
+
+# A subject with no subject reference (#8) is absent in a different way again: the pass never
+# had a picture of them. Telling them to fix a pairing would send them back to a decision the
+# plan already recorded, so their action names the widget that would change it instead.
+UNPAIRED_ABSENT_ACTION = (
+    "the frames in this shot keep the clip's own pixels, which is what a subject with no "
+    "subject reference gets - unmatched_faces=with_still on H3 Multi-Face Plan would "
+    "condition them on the whole reference still instead")
 
 
 def _subject_number(subject) -> int:
@@ -1268,10 +1436,22 @@ def _lost_reason(pick, lost_frames) -> str:
 
 
 def _absent_reason(entry, pick, shot_number: int, dropped: int) -> str:
-    """Why this shot holds no subject for them, and who decided that."""
+    """Why this shot holds no subject for them, and who decided that.
+
+    #6 left `entry` in the signature unused; #8 uses it. A subject with no subject reference has
+    a different reason to explain - the pass had no picture of them at all - and the wording for
+    a paired subject points the user at a pairing to fix, which for them is a decision that has
+    already been taken and written into the plan.
+    """
     picks = (pick or {}).get("picks") or []
     index = shot_number - 1
     planned = bool(picks[index].get("absent")) if 0 <= index < len(picks) else False
+    if entry.get("has_reference") is False:
+        if planned:
+            return ("this subject has no subject reference and the plan marked this shot "
+                    "absent for them, so the pass was never asked for a face here")
+        return ("this subject has no subject reference, so the pass reached this shot with no "
+                "picture of them to anchor on")
     if planned:
         return ("the plan put an absent entry on this shot - no frame of it shows this subject, "
                 "so there is nobody here for the pass to refine")
@@ -1345,7 +1525,12 @@ def shot_account(plan=None, subject=None, transform=None, pick=None) -> list:
             record["action"] = LOST_ACTION
         elif state == SHOT_ABSENT_PLANNED:
             record["reason"] = _absent_reason(entry, pick, number, len(dropped))
-            record["action"] = ABSENT_ACTION
+            # #8: a subject with no subject reference is told what that costs them here, not sent
+            # off to fix a pairing the plan has already settled. An entry the plan does not hold
+            # keeps the paired wording, because nothing here says otherwise.
+            record["action"] = (UNPAIRED_ABSENT_ACTION
+                                if (entry or {}).get("has_reference") is False
+                                else ABSENT_ACTION)
         elif absent or dropped:
             record["reason"] = (f"{len(absent) + len(dropped)} of {record['frames']} frame(s) "
                                 f"of this shot were absent; the rest were refined")
@@ -1370,7 +1555,7 @@ def absence_lines(shots, subject) -> list:
         state = shot["state"]
         if state == SHOT_ABSENT_PLANNED:
             lines.append(f"subject {index} is not in {where}: {shot['reason']} - "
-                         f"{ABSENT_ACTION}")
+                         f"{shot.get('action') or ABSENT_ACTION}")
         elif state == SHOT_LOST:
             span = (f"{shot['frames_lost']} of {shot['frames']} frame(s)"
                     + (f" (frames {shot['lost_start']}-{shot['lost_end']})"

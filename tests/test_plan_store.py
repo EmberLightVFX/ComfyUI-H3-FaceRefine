@@ -213,7 +213,7 @@ def test_union_makes_a_subject_of_every_face_on_either_plate():
 def test_subjects_are_ordered_left_to_right_at_the_match_frame():
     """Passes composite in this order, so it is the order the user reads off the preview."""
     plan = _plan(target_boxes=list(reversed(CLIP_BOXES)),
-                 target_confs=list(reversed(CLIP_CONFS)))
+                 target_confs=list(reversed(CLIP_CONFS)), unmatched_faces="no_reference")
 
     # clip_face is the detection order; the SUBJECTS themselves run left to right.
     assert [s["clip_face"] for s in plan["subjects"]] == [2, 1, 0]

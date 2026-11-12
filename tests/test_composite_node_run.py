@@ -98,7 +98,7 @@ def test_the_audio_note_names_the_one_audio_that_survives(pack, monkeypatch):
 
 def test_a_missing_middle_pass_refuses_naming_it_and_where_next_goes(pack, monkeypatch):
     """Half a composited clip is worse than an error: a crops-only pass is not a pass."""
-    plan, _, _, _ = _run(pack, monkeypatch)                   # three subjects
+    plan, _, _, _ = _run(pack, monkeypatch, mode="no_reference")   # three subjects
     _save(pack, plan, 0, PASS_0)
     save = pack.NODE_CLASS_MAPPINGS["H3PassSave"]()
     save.run(plan, 1, "crops", PASS_1, _transform(FRAMES))    # got this far, no stitched
