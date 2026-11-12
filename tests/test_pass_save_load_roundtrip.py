@@ -109,7 +109,7 @@ def test_a_stitched_pass_completes_the_subject_and_the_job_resumes_past_it(pack,
     # A stitched stream has nothing new to record, so it is legal with transform unwired.
     _, stitched_report, _, complete = save.run(plan, 0, "stitched", _frames())
     assert complete == 1
-    assert "not recorded" in stitched_report
+    assert "nothing new to record" in stitched_report
     with open(job + "/manifest.json", encoding="utf-8") as fh:
         written = json.load(fh)
     assert written["passes"]["0"]["complete"] is True

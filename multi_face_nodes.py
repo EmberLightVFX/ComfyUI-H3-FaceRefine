@@ -419,6 +419,17 @@ class H3MultiFacePlan:
 
         name = _derived_job_name(images, job_name)
         job = plan_store.job_dir_for(folder_paths.get_output_directory(), name)
+        if os.path.isfile(plan_store.plan_path(job)):
+            # A job folder is one pairing's. The subject references and every pass inside it
+            # were cut from the inputs that made this plan, so overwriting it after a widget
+            # changed would leave a folder holding two pairings' work - and the stitch node
+            # would happily composite them into one clip. Same inputs is a resume, and has to
+            # stay possible or no job could ever be re-run.
+            plan_store.check_pairing_inputs(
+                plan_store.read_plan(job), plan, job,
+                f"Set job_name to a new name for this pairing, or delete/rename {job} if you "
+                f"mean to re-plan this one from scratch: the subject references and every "
+                f"pass saved in it were cut from the inputs above.")
         os.makedirs(job, exist_ok=True)
 
         # The crops are cut and written BEFORE the plan is written, so the plan records the
@@ -910,8 +921,317 @@ class H3SubjectSelect:
         return (narrowed, reference, int(exists), int(chosen["index"]), report)
 
 
+# ----------------------------------------------------------------------------
+# H3 Pass Save / H3 Pass Load: one subject's pass, checkpointed in the job folder (#5)
+# ----------------------------------------------------------------------------
+#
+# The pass itself stays the released pipeline (ADR 0005): tracker, H3, stitch, untouched. What
+# is checkpointed is what a pass PRODUCES - the crops it was fed, the frames it composited
+# back, and the crop positions that put them where they belong - so a resumed job never re-runs
+# a detection pass, a track, or a generation for a subject that is already done.
+
+# The same advice on every refusal, because the reason is the same every time: a job folder
+# holds ONE pairing's passes, and mixing two pairings into one clip is what these checks
+# exist to prevent.
+PAIRING_ADVICE = (
+    "Set job_name on H3 Multi-Face Plan to a new name for this pairing, or re-run that node "
+    "deliberately with the SAME inputs to resume this job. If the inputs really are meant to "
+    "change, rename or delete the job folder first: every pass already inside it was cut from "
+    "the inputs above."
+)
+
+
+def checked_plan(plan, label: str = "plan") -> dict:
+    if not isinstance(plan, dict) or "subjects" not in plan:
+        raise ValueError(
+            f"{label} is not a subject plan - wire it from H3 Multi-Face Plan's plan output, "
+            f"or read it out of the job folder's plan.json.")
+    return plan
+
+
+def job_folder_for_plan(plan, node: str) -> str:
+    job = job_dir_for_plan(plan)
+    if not job:
+        raise ValueError(
+            f"the plan records no job folder, so {node} has nowhere to read or write: run H3 "
+            f"Multi-Face Plan with job_name set.")
+    return job
+
+
+def checked_subject(plan, choice) -> int:
+    """A subject number this plan actually has.
+
+    The manifest keys and the folder names ARE this number, so a number the plan does not have
+    would checkpoint a subject nobody planned and resume a job on a phantom.
+    """
+    try:
+        index = int(choice)
+    except (TypeError, ValueError):
+        raise ValueError(f"subject must be a subject number, got {choice!r}") from None
+    known = plan_store.plan_subject_indices(plan)
+    if index not in known:
+        raise ValueError(
+            f"subject {index} is not in this plan - its subjects are "
+            f"{', '.join(str(i) for i in known) or 'none'}. Use a number H3 Multi-Face Plan "
+            f"printed in its report and on the pairing preview.")
+    return index
+
+
+def checked_image_batch(images, label: str) -> tuple[int, int, int]:
+    """An IMAGE batch, as (frames, width, height) - float 0-1, or say so plainly."""
+    if images is None or int(images.dim()) != 4:
+        raise ValueError(
+            f"{label}: wire an IMAGE batch - the crops from H3 Face Track + Crop, or the "
+            f"stitched frames from H3 Face Stitch.")
+    count, height, width = int(images.shape[0]), int(images.shape[1]), int(images.shape[2])
+    if count < 1:
+        raise ValueError(f"{label} arrived with no frames")
+    if str(images.dtype) not in ("torch.float32", "torch.float64", "torch.float16"):
+        raise ValueError(
+            f"{label} is a {images.dtype} batch. This pack's IMAGE batches are float 0-1, so "
+            f"convert it before checkpointing - a uint8 batch would be written back as noise.")
+    return count, width, height
+
+
+def _checkpoint_report_lines(job, index, stage, written, complete, note: str = "") -> list[str]:
+    """The lines both pass nodes print, from the manifest record they share."""
+    folder = plan_store.stage_dir(job, index, stage)
+    lines = [f"subject {index}   stage {stage}   {written.get('frames')} frame(s) at "
+             f"{written.get('width')}x{written.get('height')}"]
+    lines.append(f"images: {folder}")
+    if written.get("first"):
+        lines.append(f"          {written['first']} ... {written['last']}   ordinary PNGs: "
+                     f"open them to see what this pass was actually fed")
+    if written.get("positions"):
+        lines.append(f"crop positions: {plan_store.positions_path(job, index)}")
+    if note:
+        lines.append(note)
+    lines.append("pass COMPLETE - crops and stitched are both recorded" if complete
+                 else "pass NOT complete yet: a subject only counts as done once its stitched "
+                      "stage is recorded, so a half-finished pass is resumed, not skipped")
+    lines.append(f"manifest: {plan_store.manifest_path(job)}")
+    return lines
+
+
+
+class H3PassSave:
+    """Write one subject's pass into the job folder: the frames as an ordinary numbered image
+    sequence, the crop positions as readable JSON, and the manifest entry saying how far this
+    subject got.
+
+    Only the **stitched** stage completes a pass. A `crops` entry means "this far got done", so
+    a job that died after the crops keeps that work and still resumes on the same subject
+    instead of declaring it finished.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # WIDGET ORDER IS PERMANENT (ADR 0002): ComfyUI stores widget values by position.
+        # Anything new goes at the end. tests/test_node_contract.py pins this list.
+        return {
+            "required": {
+                "plan": (H3FACEPLAN, {
+                    "tooltip": "The subject plan, from H3 Multi-Face Plan. It carries the job "
+                               "folder and the subject set, so this node needs no job_name of "
+                               "its own - and it is checked against the plan.json already in "
+                               "that folder before a single frame is written."}),
+                "subject": ("INT", {
+                    "default": 0, "min": 0, "max": MAX_SUBJECT_CHOICES - 1, "step": 1,
+                    "tooltip": "Which subject's pass this is - the number H3 Subject Select "
+                               "took for it. Wire that node's subject_index output in and the "
+                               "two can never disagree. A number the plan does not have is "
+                               "refused, rather than checkpointing a subject nobody planned."}),
+                "stage": (list(plan_store.PASS_STAGES), {
+                    "default": "crops",
+                    "tooltip": "Which half of the pass is being checkpointed.\n\n"
+                               "crops (default): the crops H3 was fed, plus their positions. "
+                               "This does NOT finish a subject.\n\n"
+                               "stitched: the frames composited back onto the clip. Recording "
+                               "this is what completes a subject's pass and lets the job "
+                               "resume past them."}),
+                "images": ("IMAGE", {
+                    "tooltip": "The frames to write: the crop batch for stage=crops, the "
+                               "stitched frames for stage=stitched. Written as PNGs in frame "
+                               "order - frame_0000.png onward - so you can open them and see "
+                               "exactly what H3 was given. The names never change: re-running "
+                               "a pass overwrites its own frames instead of leaving a second "
+                               "copy nobody can line up with frame 7."}),
+            },
+            "optional": {
+                "transform": ("H3FACEXFORM", {
+                    "tooltip": "The crop positions, from H3 Face Track + Crop. Required for "
+                               "stage=crops - without them the crops cannot be put back where "
+                               "they were cut. For stage=stitched there is nothing new to "
+                               "record, so leave it unwired."}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "INT", "INT")
+    RETURN_NAMES = ("images", "report", "subject_index", "pass_complete")
+    FUNCTION = "run"
+    # The report and pass_complete are meant to be read off the node at the end of a pass;
+    # `images` passes straight through, so a save can sit in the middle of the chain too.
+    OUTPUT_NODE = True
+    CATEGORY = CATEGORY
+
+    def run(self, plan, subject, stage, images, transform=None):
+        plan = checked_plan(plan)
+        job = job_folder_for_plan(plan, "H3 Pass Save")
+        # Refuse before two pairings mix: the plan in the graph against the plan.json already
+        # in this folder, naming every input that differs.
+        plan_store.check_pairing_inputs(plan_store.read_plan(job), plan, job, PAIRING_ADVICE)
+        plan_store.check_manifest_subjects(plan, job)
+
+        index = checked_subject(plan, subject)
+        name = plan_store.checked_stage(stage)
+        count, width, height = checked_image_batch(images, "images")
+
+        files = plan_store.stage_files(job, index, name, count)
+        os.makedirs(os.path.dirname(files[0]), exist_ok=True)
+        # The same PNG writer the subject references use: float 0-1 in, 8-bit PNG out.
+        for path, frame in zip(files, images):
+            _write_reference_png(path, frame, (0, 0, width, height))
+
+        written = {"frames": count, "width": width, "height": height,
+                   "first": os.path.basename(files[0]),
+                   "last": os.path.basename(files[-1])}
+        note = ""
+        if name == "crops":
+            if transform is None:
+                raise ValueError(
+                    "transform: the crops stage records where each crop sat in its frame, "
+                    "which is the only thing that lets the stitched result be put back. Wire "
+                    "H3 Face Track + Crop's transform into this input, or save "
+                    "stage=stitched.")
+            written["positions"] = os.path.basename(
+                plan_store.write_positions(job, index, transform))
+        elif transform is not None:
+            note = ("transform was wired but nothing new to record: a subject's crop positions "
+                    "belong to its crops stage, and rewriting them from a stitched pass would "
+                    "put those frames back somewhere other than where they were cut")
+        else:
+            note = ("transform left unwired, and there is nothing new to record: a stitched "
+                    "pass's crop positions are the ones its crops stage saved, and they stay "
+                    "exactly as they were written")
+
+        plan_store.record_pass_stage(job, index, name, written)
+        complete = 1 if plan_store.pass_is_complete(job, index) else 0
+        lines = _checkpoint_report_lines(job, index, name, written, complete, note)
+        if complete:
+            coming = plan_store.next_subject(plan, job)
+            nxt = coming["index"] if coming is not None else "none - this job is finished"
+            lines.append(f"next subject: {nxt}")
+        else:
+            lines.append(f"next subject still up: {index}   H3 Subject Select's next takes "
+                         f"it, and this subject again until its stitched stage is recorded")
+        report = "\n".join(lines)
+        print("[H3PassSave] " + report.replace("\n", "\n[H3PassSave] "))
+        return (images, report, index, complete)
+
+
+
+class H3PassLoad:
+    """Read one subject's pass back out of the job folder.
+
+    `stream = crops` returns the crops H3 was fed plus their crop positions, so a pass can be
+    stitched without the tracker ever running again. `stream = stitched` returns the frames that
+    pass composited back onto the clip - the result of that subject's work, ready to be the base
+    the next subject's pass starts from. Nothing here re-detects, re-tracks or re-generates.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # WIDGET ORDER IS PERMANENT (ADR 0002): ComfyUI stores widget values by position.
+        # Anything new goes at the end. tests/test_node_contract.py pins this list.
+        return {
+            "required": {
+                "plan": (H3FACEPLAN, {
+                    "tooltip": "The same subject plan the pass was saved with. It is checked "
+                               "against the job folder's plan.json first, so a pass cannot be "
+                               "read into a job planned from a different pairing."}),
+                "subject": ("INT", {
+                    "default": 0, "min": 0, "max": MAX_SUBJECT_CHOICES - 1, "step": 1,
+                    "tooltip": "Which subject's pass to read - the number H3 Pass Save wrote "
+                               "it under."}),
+                "stream": (list(plan_store.PASS_STAGES), {
+                    "default": "crops",
+                    "tooltip": "crops (default): the crops that were fed to H3, plus their "
+                               "crop positions - feed these to H3 Face Stitch to composite a "
+                               "checkpointed pass without re-tracking.\n\n"
+                               "stitched: the frames that pass composited back onto the clip. "
+                               "Wire this into the next subject's base_images."}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "H3FACEXFORM", "STRING")
+    RETURN_NAMES = ("images", "transform", "report")
+    FUNCTION = "run"
+    CATEGORY = CATEGORY
+
+
+    def run(self, plan, subject, stream):
+        import torch
+
+        plan = checked_plan(plan)
+        job = job_folder_for_plan(plan, "H3 Pass Load")
+        plan_store.check_pairing_inputs(plan_store.read_plan(job), plan, job, PAIRING_ADVICE)
+        plan_store.check_manifest_subjects(plan, job)
+
+        index = checked_subject(plan, subject)
+        stage = plan_store.checked_stage(stream)
+        folder = plan_store.stage_dir(job, index, stage)
+        record = plan_store.manifest_stage_record(job, index, stage)
+        if not isinstance(record, dict) or not record.get("frames"):
+            raise FileNotFoundError(
+                f"subject {index} has no {stage} pass recorded in "
+                f"{plan_store.manifest_path(job)}, and {folder} holds nothing to read instead. "
+                f"Run this subject's pass and save it with H3 Pass Save stage={stage}, or read "
+                f"a subject the manifest does record.")
+        count = int(record["frames"])
+        files = plan_store.stage_files(job, index, stage, count)
+        gaps = [path for path in files if not os.path.isfile(path)]
+        if gaps:
+            raise FileNotFoundError(
+                f"subject {index}'s {stage} pass is incomplete: {len(gaps)} of {count} frame(s) "
+                f"are missing from {folder}, starting with {gaps[0]}. The manifest records the "
+                f"pass, so the images went after it was saved. Re-run this pass and H3 Pass "
+                f"Save stage={stage} for subject {index}, or delete that manifest entry so the "
+                f"subject counts as unfinished again.")
+
+        # One PNG per frame, back in the order the pass was saved. Same converter the subject
+        # references use, so a checkpoint reads exactly as it was written.
+        images = torch.cat([_read_reference_png(path) for path in files])
+
+        if stage == "crops":
+            # A crops stream without its positions is useless, so this raises rather than
+            # handing back frames nothing can be stitched from.
+            positions = plan_store.read_positions(job, index)
+        else:
+            positions = (plan_store.read_positions(job, index)
+                         if os.path.isfile(plan_store.positions_path(job, index)) else None)
+
+        complete = 1 if plan_store.pass_is_complete(job, index) else 0
+        lines = _checkpoint_report_lines(job, index, stage, record, complete)
+        if positions is not None:
+            lines.append(f"crop positions: {plan_store.positions_path(job, index)}   "
+                         f"{len(positions.get('boxes') or [])} frame(s); canvas, src_size and "
+                         f"segments come back as tuples, the payload the tracker built")
+        else:
+            lines.append("no crop positions for this subject, so the transform output is "
+                         "empty: these frames are already composited, and their positions were "
+                         "never saved")
+        report = "\n".join(lines)
+        print("[H3PassLoad] " + report.replace("\n", "\n[H3PassLoad] "))
+        return (images, positions, report)
+
+
 NODE_CLASS_MAPPINGS = {"H3MultiFacePlan": H3MultiFacePlan,
-                       "H3SubjectSelect": H3SubjectSelect}
+                       "H3SubjectSelect": H3SubjectSelect,
+                       "H3PassSave": H3PassSave,
+                       "H3PassLoad": H3PassLoad}
 NODE_DISPLAY_NAME_MAPPINGS = {"H3MultiFacePlan": "H3 Multi-Face Plan",
-                              "H3SubjectSelect": "H3 Subject Select"}
+                              "H3SubjectSelect": "H3 Subject Select",
+                              "H3PassSave": "H3 Pass Save",
+                              "H3PassLoad": "H3 Pass Load"}
+
 

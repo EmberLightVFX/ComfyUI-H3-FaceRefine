@@ -192,10 +192,10 @@ def test_the_pass_load_inputs_and_widgets_are_in_this_exact_order():
     schema = m.H3PassLoad.INPUT_TYPES()
     assert list(schema["required"]) == ["plan"] + PASS_LOAD_ORDER
     assert not schema.get("optional")
-    assert schema["plan"][0] == m.H3FACEPLAN
-    assert schema["subject"][0] == "INT"
-    assert list(schema["stream"][0]) == list(ps.PASS_STAGES)
-    assert schema["stream"][1]["default"] == "crops"
+    assert schema["required"]["plan"][0] == m.H3FACEPLAN
+    assert schema["required"]["subject"][0] == "INT"
+    assert list(schema["required"]["stream"][0]) == list(ps.PASS_STAGES)
+    assert schema["required"]["stream"][1]["default"] == "crops"
 
 
 def test_the_pass_widgets_are_a_number_then_the_stage_and_crops_is_first():
