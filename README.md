@@ -1221,13 +1221,8 @@ Every pass reports itself **per shot**, and the two kinds of empty shot are word
 purpose, because only one of them is worth fixing:
 
 ```
-shots   subject 0 is not in shot 2 (frames 4-7): the plan put an absent entry on this shot - no frame
-        of it shows this subject, so there is nobody here for the pass to refine - original pixels are
-        kept there, which is the intended result for an absence - if this person IS in this shot, plan
-        on a match frame they share with the reference still, or name them with Pick faces
-shots   subject 0 was lost in shot 3 (frames 8-11): 4 of 4 frame(s) produced nobody - faces were
-        detected in this shot but none of them matched this subject's identity; check identity_track
-        and identity_threshold, or lower confidence, on H3 Face Track + Crop
+shots           subject 0 is not in shot 2 (frames 4-7): the plan put an absent entry on this shot - no frame of it shows this subject, so there is nobody here for the pass to refine - original pixels are kept there, which is the intended result for an absence - if this person IS in this shot, plan on a match frame they share with the reference still, or name them with Pick faces
+shots           subject 0 was lost in shot 3 (frames 8-11): 4 of 4 frame(s) produced nobody - faces were detected in this shot but none of them matched this subject's identity; check identity_track and identity_threshold, or lower confidence, on H3 Face Track + Crop
 ```
 
 A **planned absence** is the plan's decision and the clip's own pixels stay: expected, not a failure.
@@ -1272,8 +1267,13 @@ images: <output>/shot 07/passes/subject_0000/crops
 crop positions: <output>/shot 07/passes/subject_0000/crops.json
 pass NOT complete yet: a subject only counts as done once its stitched stage is recorded, so a half-finished pass is resumed, not skipped
 manifest: <output>/shot 07/manifest.json
+shots           subject 0 was lost in shot 1 (frames 0-3): 1 of 4 frame(s) (frames 3-3) produced nobody - the tracker reached this shot with this subject selected and produced nobody for those frames - their identity fell below the threshold, or the face was never detected; check identity_track and identity_threshold, or lower confidence, on H3 Face Track + Crop
 next subject still up: 0   H3 Subject Select's next takes it, and this subject again until its stitched stage is recorded
 ```
+
+The **shot account** repeats here — measured against what this pass actually produced, from the
+`transform` wired in for `stage=crops` or read back from `crops.json` for `stage=stitched`, which is
+why the two reports can never disagree about the same subject.
 
 The complete flag is **derived** inside the manifest writer from the stages actually on disk; no
 caller can set it, which is why a job cannot be talked into believing it is finished.
