@@ -37,6 +37,13 @@ PLAN_VERSION = 2
 PLAN_READABLE_VERSIONS = (1, PLAN_VERSION)
 PLAN_FILENAME = "plan.json"
 
+# The pairing preview image, written by the plan node into the job folder (#9). It is the same
+# image the node already returns as its `preview` output - both plates, every face outlined and
+# numbered, a pair sharing a colour, a switched-off face struck through - kept on disk so the
+# read-only panel can show a pairing without re-detecting or re-pairing anything. The plan node
+# draws it; nothing else writes it.
+PREVIEW_FILENAME = "pairing_preview.png"
+
 SUBJECT_SOURCES = ("target_clip", "reference_still", "union")
 
 # What to do with a face that found no partner on the other plate (#8). This belongs to the PLAN
