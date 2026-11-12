@@ -289,12 +289,19 @@ def test_the_excluded_faces_widget_is_read_as_a_typed_list():
     assert "bystander" in str(exc.value)
 
 
-def test_max_subjects_is_recorded_not_applied():
-    """The cap travels with the plan; which subjects it cuts is later passes' business."""
+def test_max_subjects_is_recorded_and_applied():
+    """#10 reversed this test. The cap is not decoration: it truncates the ordered subject set
+    here, so every downstream stage - the subject combo, `next`, the manifest, the composite
+    gate - sees the same job rather than three different ones. Cap 2 of 3 keeps the two leftmost
+    faces and drops the third by name; `no_reference` keeps the unpaired face in the set so the
+    order is the plain left-to-right one."""
     plan = _plan(max_subjects=2, unmatched_faces="no_reference")
 
-    assert plan["subject_count"] == 3
     assert plan["inputs"]["max_subjects"] == 2
+    assert plan["subject_count"] == 2
+    assert [s["clip_face"] for s in plan["subjects"]] == [0, 1]
+    assert [s["clip_face"] for s in plan["capped_out"]] == [2]
+    assert [s["index"] for s in plan["capped_out"]] == [None]
 
 
 def test_an_unknown_subject_source_is_an_error():

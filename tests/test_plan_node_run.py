@@ -107,7 +107,7 @@ def pack(tmp_path, monkeypatch):
 
 
 def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
-         excluded="", job_name="group shot", source="union", mode="leave"):
+         excluded="", job_name="group shot", source="union", mode="leave", max_subjects=0):
     fake = _FakeModel([_Found(CLIP_BOXES, CLIP_CONFS), _Found(still_boxes, STILL_CONFS)])
     monkeypatch.setattr(pack.nodes, "_load_detector", lambda name: fake)
     node = pack.NODE_CLASS_MAPPINGS["H3MultiFacePlan"]()
@@ -115,7 +115,7 @@ def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
     images.h3_video_name = "shot_07.mp4"
     still = torch.zeros((1, int(still_size[1]), int(still_size[0]), 3))
     return node.run(images, still, "face_yolov8m.pt", 0.35, 2, source, 0.05, excluded,
-                    0, job_name, mode)
+                    max_subjects, job_name, mode)
 
 
 def test_the_plan_node_plans_pairs_and_reports(pack, monkeypatch):
@@ -138,6 +138,22 @@ def test_the_plan_node_plans_pairs_and_reports(pack, monkeypatch):
     # The preview is both plates side by side, one image, both at the clip's height.
     assert preview.dim() == 4 and preview.shape[0] == 1 and preview.shape[1] == 1000
     assert preview.shape[2] > 2000
+
+
+def test_the_cap_reports_loudly_at_the_node(pack, monkeypatch):
+    """#10's acceptance is that a tail cut cannot be missed. Pure tests pin the sentence; this
+    pins that the node actually prints it, with the dropped faces named and the number the cap
+    saved sitting next to the number it spends."""
+    plan, _, report, count = _run(pack, monkeypatch, mode="no_reference", max_subjects=1)
+
+    assert count == 1 == plan["subject_count"]
+    assert [s["clip_face"] for s in plan["capped_out"]] == [1, 2]
+    assert "subject cap 1: 2 face(s) dropped" in report
+    assert "clip face 1 (at 450, 450 on frame 2)" in report
+    assert "clip face 2 (at 850, 180 on frame 2)" in report
+    assert "Raise max_subjects" in report
+    assert "1 subject(s) of 3 to generate; uncapped cost would be 3 subject(s) x 4 frame(s)" \
+        in report
 
 
 def test_the_plan_and_the_subject_references_land_in_the_job_folder(pack, monkeypatch,
