@@ -239,6 +239,112 @@ def crop_rect_for_reference(subject_rect, still_size, target_size) -> list[int]:
     return [xi, yi, wi, hi]
 
 
+# ----------------------------------------------------------------------------
+# how much two subjects' crop regions sit on each other, at the match frame
+# ----------------------------------------------------------------------------
+#
+# Each pass feathers its crop back onto the clip. When two subjects' crop regions overlap, one
+# pass's feathered edge lands on pixels another pass has already refined, so the finished clip
+# shows a soft seam across somebody's face. That is worth SAYING about, and nothing more: two
+# people standing close together are still two subjects, and the composite is still the answer.
+# Hence a threshold, and hence a warning rather than an error.
+
+DEFAULT_OVERLAP_THRESHOLD = 0.25
+
+
+def _plan_size(plan, key: str):
+    """One plate size out of a plan, in either place `pairing_fingerprint` reads it from."""
+    value = ((plan or {}).get("inputs") or {}).get(key)
+    if value is None:
+        value = (plan or {}).get(key)
+    return value
+
+
+def _checked_threshold(threshold) -> float:
+    try:
+        value = float(threshold)
+    except (TypeError, ValueError):
+        value = float("nan")
+    if not 0.0 <= value <= 1.0:
+        raise ValueError(
+            f"overlap_threshold must be a fraction between 0 and 1, got {threshold!r}. It is "
+            f"how much of the two crops' combined area they share at the match frame.")
+    return value
+
+
+def subject_crop_rect(plan, subject, crop_factor: float = DEFAULT_CROP_FACTOR):
+    """The rectangle one subject's crop covers, in TARGET-CLIP pixels at the match frame.
+
+    It is `tracker_rect` - the same arithmetic the plan cut the subject reference with - so the
+    overlap measure is the region that will actually be feathered back, not the face box inside
+    it. A subject the clip never saw is measured from the still's own face and scaled into clip
+    coordinates, which is how it was framed in the first place. ``None`` when the plan recorded
+    no face for that subject on either plate.
+
+    Returns ``[x, y, w, h]`` floats in clip pixels.
+    """
+    box = (subject or {}).get("clip_box")
+    if box is not None:
+        return tracker_rect(box, _size(_plan_size(plan, "target_size"), "target clip"),
+                            crop_factor)
+
+    still_box = (subject or {}).get("still_box")
+    if still_box is None:
+        return None
+    still_size = _plan_size(plan, "still_size") or _plan_size(plan, "target_size")
+    rect = tracker_rect(still_box, _size(still_size, "reference still"), crop_factor)
+    scale = (plan or {}).get("scale")
+    scale = 1.0 if scale is None else float(scale)
+    return [float(v) * scale for v in rect]
+
+
+def overlapping_subject_pairs(plan, threshold: float = DEFAULT_OVERLAP_THRESHOLD,
+                              crop_factor: float = DEFAULT_CROP_FACTOR) -> list[dict]:
+    """Every pair of subjects whose crop regions overlap by more than ``threshold``.
+
+    The measure is intersection over union of the two crop rectangles at the match frame, so 0
+    means the crops merely touch and 1 means they are the same region. Exactly on the threshold
+    is NOT a warning: a plan planned at a round number would otherwise warn about itself.
+
+    Pairs come back in plan order, the lower-numbered subject first, which is also the left to
+    right order the plan was settled in. Nothing here raises for a plan with two subjects on top
+    of each other - this reports, it does not judge.
+
+    Returns ``[{"a", "b", "overlap", "rect_a", "rect_b"}, ...]``.
+    """
+    limit = _checked_threshold(threshold)
+    subjects = (plan or {}).get("subjects") or []
+
+    rects = []
+    for position, subject in enumerate(subjects):
+        if subject is None:
+            rects.append((position, None))
+            continue
+        index = subject.get("index")
+        index = position if index is None else _subject_index(index)
+        rects.append((index, subject_crop_rect(plan, subject, crop_factor)))
+
+    pairs = []
+    for i in range(len(rects)):
+        for j in range(i + 1, len(rects)):
+            index_a, rect_a = rects[i]
+            index_b, rect_b = rects[j]
+            if rect_a is None or rect_b is None:
+                continue
+            box_a = np.array([[rect_a[0], rect_a[1], rect_a[0] + rect_a[2], rect_a[1] + rect_a[3]]])
+            box_b = np.array([[rect_b[0], rect_b[1], rect_b[0] + rect_b[2], rect_b[1] + rect_b[3]]])
+            shared = float(_overlap_area(box_a, box_b)[0][0])
+            union = (rect_a[2] * rect_a[3]) + (rect_b[2] * rect_b[3]) - shared
+            if union <= 0.0:
+                continue
+            overlap = shared / union
+            if overlap > limit:
+                pairs.append({"a": index_a, "b": index_b, "overlap": float(overlap),
+                              "rect_a": [float(v) for v in rect_a],
+                              "rect_b": [float(v) for v in rect_b]})
+    return pairs
+
+
 
 
 # ----------------------------------------------------------------------------

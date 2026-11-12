@@ -222,6 +222,52 @@ def test_the_stage_vocabulary_is_the_plan_module_s_and_stitched_is_the_completin
     assert "stitched" in ps.PASS_STAGES
 
 
+COMPOSITE_ORDER = ["overlap_threshold"]
+
+
+def test_the_composite_is_registered_and_its_report_is_readable_off_the_node():
+    assert m.NODE_CLASS_MAPPINGS["H3MultiFaceComposite"] is m.H3MultiFaceComposite
+    assert m.NODE_DISPLAY_NAME_MAPPINGS["H3MultiFaceComposite"] == "H3 Multi-Face Composite"
+
+
+def test_the_composite_inputs_and_widgets_are_in_this_exact_order():
+    """Permanent the moment anyone saves a workflow. It takes the plan and the target clip and
+    nothing else: no `base_images`, no `transform`, no per-subject wiring. The released
+    `H3 Face Stitch` did the feathering once per pass; asking it again here is how a finished
+    clip ends up feathered twice."""
+    schema = m.H3MultiFaceComposite.INPUT_TYPES()
+    assert list(schema["required"]) == ["plan", "images"] + COMPOSITE_ORDER
+    assert not schema.get("optional")
+    assert schema["required"]["plan"][0] == m.H3FACEPLAN
+    assert schema["required"]["images"][0] == "IMAGE"
+    assert schema["required"]["overlap_threshold"][0] == "FLOAT"
+
+
+def test_the_composite_s_returns_are_the_finished_clip_a_report_and_which_subject_carries_it():
+    node = m.H3MultiFaceComposite
+    assert node.RETURN_TYPES == ("IMAGE", "STRING", "INT", "INT")
+    assert node.RETURN_NAMES == ("images", "report", "final_subject", "subject_count")
+    assert len(node.RETURN_TYPES) == len(node.RETURN_NAMES)
+    assert node.OUTPUT_NODE is True
+    assert node.FUNCTION == "run"
+    assert node.CATEGORY == m.CATEGORY == "MiniMax H3/Face Refine"
+
+
+def test_the_composite_takes_its_inputs_in_schema_order():
+    schema = m.H3MultiFaceComposite.INPUT_TYPES()
+    wanted = list(schema["required"]) + list(schema.get("optional") or {})
+    args = [p for p in inspect.signature(m.H3MultiFaceComposite.run).parameters if p != "self"]
+    assert args == wanted
+
+
+def test_the_overlap_threshold_is_the_plan_module_s_number_and_warns_by_default():
+    """The measure is pure and its default threshold is shared with it, so the node cannot
+    quietly disagree with what the pure tests pin down."""
+    assert 0.0 < ps.DEFAULT_OVERLAP_THRESHOLD < 1.0
+    widget = m.H3MultiFaceComposite.INPUT_TYPES()["required"]["overlap_threshold"][1]
+    assert float(widget["default"]) == ps.DEFAULT_OVERLAP_THRESHOLD
+
+
 def _module_level_imports(path) -> set[str]:
     """Absolute top-level module names imported outside any function or class.
 
