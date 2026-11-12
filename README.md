@@ -1028,7 +1028,7 @@ subject, so it has to be visible at the node that made it.
 | `excluded_faces` | empty | Clip face numbers to switch off, comma-separated, exactly as numbered on the `preview`: `0, 3`. An **excluded face** never becomes a subject and keeps its original pixels. A text widget, so the answer survives a reload with no front end. |
 | `max_subjects` | `0` | `0` = no cap. A cap is a **loud** truncation: it applies after the faces are ordered and after `unmatched_faces` has had its say, every dropped face is named in the report with its position at the match frame, and the number the cap saves is printed beside the number it spends. It also joins the **pairing fingerprint**, because a cap changes who the subjects are. |
 | `job_name` | empty | The **job folder** under ComfyUI's output folder. Left blank it is named after the clip. **Keep the same name to resume a job** — change it, or change any input the fingerprint tracks, and the nodes refuse rather than mixing two pairings into one clip. |
-| `unmatched_faces` | `leave` | What becomes of an **unpaired face** — a face on one plate with no partner on the other. It decides the **subject set**, so it lives here rather than on the pass nodes, and it is recorded in `plan.json`. See [`unmatched_faces`](#unmatched-faces-three-answers). |
+| `unmatched_faces` | `leave` | What becomes of an **unpaired face** — a face on one plate with no partner on the other. It decides the **subject set**, so it lives here rather than on the pass nodes, and it is recorded in `plan.json`. See [`unmatched_faces`](#unmatched_faces-three-answers). |
 
 **Outputs**
 
