@@ -45,6 +45,18 @@ _Avoid_: todo list, state file, progress file
 The inputs that decide a job's pairing - both plate sizes, the match frame, `subject_source`, the match tolerance, the exclusions, and the subject set itself - compared before any pass reads or writes a job folder, so two pairings never mix into one clip.
 _Avoid_: hash, checksum, signature
 
+**Composite order**:
+The order the passes get composited in: the subject plan's own order, left to right at the match frame. Fixed by the plan, never by a widget, and named in the composite's report.
+_Avoid_: render order, queue order, pass order (a pass belongs to a subject, this names the subjects)
+
+**Composited clip**:
+The finished clip - the last subject's stitched frames, which already carry every earlier pass composited into them, because each pass took the previous pass's result as its base.
+_Avoid_: merged clip, blended output (nothing is blended at the end), combined clip
+
+**Overlap warning**:
+A note in the composite's report that two subjects' crop regions cover the same pixels at the match frame by more than the threshold, so one pass's feathered edge lands on another's refined pixels. A warning, never a refusal.
+_Avoid_: collision, conflict, clash
+
 
 **Shot**:
 A run of consecutive frames with no cut; face numbering and subject pairing are per shot.

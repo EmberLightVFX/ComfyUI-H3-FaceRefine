@@ -11,6 +11,13 @@ Import boundary: nothing that needs ComfyUI, torch or the detector is imported a
 level. `INPUT_TYPES()` has to be callable in a test run that has only numpy installed, and
 the contract that pins the widget order runs there (ComfyUI stores widget values
 positionally, so that order is a promise - see `tests/test_node_contract.py`).
+
+Ticket #4 adds the last node of the chain, **H3 Multi-Face Composite**: it reads every
+subject's `stitched` stage out of the job folder and hands back the LAST one's frames, because
+each pass composited onto the previous pass's result - so the finished clip is that subject's
+stitched output, not a blend of all of them. It re-blends nothing (a second feather over a
+feathered edge softens the work), and it refuses when a subject's pass is missing rather than
+returning a half-composited clip.
 """
 
 from __future__ import annotations
@@ -1225,13 +1232,211 @@ class H3PassLoad:
         return (images, positions, report)
 
 
+def _order_line(order) -> str:
+    """Subjects as the composite names them: plan order, left to right at the match frame."""
+    return " -> ".join(f"subject {index}" for index in order)
+
+
+def _percent(value) -> str:
+    return f"{float(value) * 100.0:.1f}%"
+
+
+class H3MultiFaceComposite:
+    """The finished clip: every subject's pass in plan order, plus the proof they are all there.
+
+    Passes **chain**. Subject 0's `H3 Face Stitch` composited onto the target clip; subject 1's
+    composited onto subject 0's saved stitched result (Pass Load with ``stream = stitched`` wired
+    into the stitch node's ``base_images``); and so on down the plan. So the LAST subject's
+    stitched frames already carry every earlier pass inside them, and assembling the job means
+    picking those frames up - not blending anything again. There is deliberately no
+    ``base_images`` and no ``transform`` on this node: a second feather laid over a feathered edge
+    is how a freshly refined face goes soft.
+
+    What this node adds is the gate. A job queued once per subject and interrupted between
+    subjects would otherwise hand back a clip where one person is sharp and the other is still
+    blurry, looking finished. So every subject's ``stitched`` stage has to be recorded in the
+    manifest, and its frame count and frame size have to agree with the target clip wired in
+    here. Anything missing and the node refuses, naming every subject that never landed.
+
+    Audio is not this node's to handle: it carries image batches, so the finished clip's audio is
+    the target clip's own and every pass's generated audio was discarded. The report says so,
+    because a silent surprise at the end of a long job is its own kind of bug.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # WIDGET ORDER IS PERMANENT. ComfyUI stores widget values by position, so inserting or
+        # reordering one silently reinterprets a saved workflow (ADR 0002). Anything new goes
+        # at the END. tests/test_node_contract.py pins this list.
+        return {
+            "required": {
+                "plan": (H3FACEPLAN, {
+                    "tooltip": "The subject plan, from H3 Multi-Face Plan - the same one every "
+                               "pass in this job ran on.\n\nIts subject order IS the composite "
+                               "order: subjects are numbered left to right at the match frame, so "
+                               "the plan says who was composited first with no widget to set "
+                               "here.\n\nThe plan is also checked against the plan.json already in "
+                               "the job folder. If the pairing inputs differ, the passes in that "
+                               "folder were cut from a different pairing, and this refuses rather "
+                               "than stitching two ideas of who is who into one clip."}),
+                "images": ("IMAGE", {
+                    "tooltip": "The target clip - the same IMAGE batch that fed the first pass's "
+                               "H3 Face Stitch, from the same loader, unresized and untrimmed."
+                               "\n\nNothing is composited onto it here. It is wired in so this "
+                               "node can PROVE the chain is complete: every recorded stitched pass "
+                               "has to hold this many frames at this size, or the frames in the "
+                               "job folder are not this clip's."
+                               "\n\nThe finished clip's audio is this clip's audio. These nodes "
+                               "carry image batches only, so each pass's generated audio was "
+                               "discarded - wire this clip's own audio into your save node."}),
+                "overlap_threshold": ("FLOAT", {
+                    "default": plan_store.DEFAULT_OVERLAP_THRESHOLD, "min": 0.0, "max": 1.0,
+                    "step": 0.01, "round": 0.001,
+                    "tooltip": "How much of their combined area two subjects' crop regions may "
+                               "share at the match frame before the report warns about them."
+                               "\n\n0.25 (the default) warns past a quarter; 0 warns about any "
+                               "overlap at all; 1 never warns. Measured on the crop regions H3 "
+                               "Face Track + Crop would cut, not on the faces inside them."
+                               "\n\nA warning, never an error: two people standing close together "
+                               "are still two subjects and the clip is still the right answer - "
+                               "but one pass's feathered edge lands on the other's refined "
+                               "pixels, and a soft seam across a face is easier to live with once "
+                               "you know where it is."}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "INT", "INT")
+    RETURN_NAMES = ("images", "report", "final_subject", "subject_count")
+    FUNCTION = "run"
+    # The report is the gate's verdict, and it is read off the node at the end of a job.
+    OUTPUT_NODE = True
+    CATEGORY = CATEGORY
+
+    def run(self, plan, images, overlap_threshold):
+        import torch  # deferred: the schema has to build with only numpy installed
+
+        plan = checked_plan(plan)
+        job = job_folder_for_plan(plan, "H3 Multi-Face Composite")
+        # The pass nodes' two refusals, before anything in the job folder is read.
+        plan_store.check_pairing_inputs(plan_store.read_plan(job), plan, job, PAIRING_ADVICE)
+        plan_store.check_manifest_subjects(plan, job)
+
+        frames, width, height = checked_image_batch(images, "images")
+        order = plan_store.plan_subject_indices(plan)
+        if not order:
+            raise ValueError(
+                "this plan has no subjects, so there is nothing to composite: H3 Multi-Face Plan "
+                f"found no faces, or every face was excluded. Sort the plan in {job} out first.")
+
+        stage = "stitched"   # the stage that completes a pass, and the only one that is composited
+        recorded = {}
+        absent = []
+        for index in order:
+            entry = plan_store.manifest_stage_record(job, index, stage)
+            if not isinstance(entry, dict) or not entry.get("frames"):
+                absent.append((index, "no stitched pass is recorded in the manifest, so this "
+                                      "subject's refined face is nowhere in the job folder"))
+                continue
+            files = plan_store.stage_files(job, index, stage, int(entry["frames"]))
+            gaps = [path for path in files if not os.path.isfile(path)]
+            if gaps:
+                absent.append((index, f"its stitched pass is recorded but {len(gaps)} of "
+                                      f"{len(files)} frame(s) are not in "
+                                      f"{plan_store.stage_dir(job, index, stage)}, starting with "
+                                      f"{os.path.basename(gaps[0])}"))
+                continue
+            recorded[index] = {"frames": len(files), "files": files,
+                               "width": entry.get("width"), "height": entry.get("height")}
+
+        if absent:
+            coming = plan_store.next_subject(plan, job)
+            nxt = (coming["index"] if coming is not None
+                   else "none - the manifest says every subject in this plan is done")
+            lines = [f"{len(absent)} of {len(order)} pass(es) are not in {job}, in plan order "
+                     f"{_order_line(order)}:"]
+            lines.extend(f"  - subject {index}: {why}" for index, why in absent)
+            raise ValueError(
+                "\n".join(lines)
+                + f"\nnext subject: {nxt}   H3 Subject Select's next goes to that subject: run "
+                  f"its pass through to H3 Face Stitch, then save it with H3 Pass Save "
+                  f"stage={stage}."
+                  + "\nThis composite refuses: a half-composited clip is worse than an error. It "
+                    "would look finished while the faces of the subjects named above kept the "
+                    "pixels the target clip arrived with.")
+
+        clashes = []
+        for index in order:
+            entry = recorded[index]
+            if entry["frames"] != frames:
+                clashes.append(f"  - subject {index}: its stitched pass holds "
+                               f"{entry['frames']} frame(s), the target clip wired here holds "
+                               f"{frames} frame(s)")
+            if entry["width"] is not None and (int(entry["width"]) != width
+                                               or int(entry["height"]) != height):
+                clashes.append(f"  - subject {index}: its stitched pass is "
+                               f"{int(entry['width'])}x{int(entry['height'])}px, while the target "
+                               f"clip wired here is {width}x{height}px")
+        if clashes:
+            raise ValueError(
+                f"the passes recorded in {job} are not this clip:\n" + "\n".join(clashes)
+                + "\nEvery pass composites onto the target clip, so its frame count and its frame "
+                  "size ARE the clip's. Wire the clip those passes were cut from, or re-run the "
+                  "subjects named above against this clip and save them again.")
+
+        # The assembly, in one line: the last subject's frames, because every earlier pass is
+        # already inside them. Frames come off disk in the order the manifest counted, through the
+        # same PNG reader the subject references and Pass Load use, so the same job folder read
+        # twice gives back identical tensors.
+        final = order[-1]
+        finished = torch.cat([_read_reference_png(path) for path in recorded[final]["files"]])
+
+        warnings = plan_store.overlapping_subject_pairs(plan, overlap_threshold)
+        frame = (plan or {}).get("match_frame")
+        lines = [f"job folder: {job}",
+                 f"order: {_order_line(order)}   plan order = left to right at match frame {frame}",
+                 f"chained: each pass composited onto the previous pass's stitched result and the "
+                 f"first onto the target clip. Nothing is blended here: H3 Face Stitch feathered "
+                 f"each pass once, and feathering a feathered edge again softens the work"]
+        for index in order:
+            entry = recorded[index]
+            size = (f"{int(entry['width'])}x{int(entry['height'])}px"
+                    if entry["width"] is not None else "size not recorded in the manifest")
+            lines.append(f"subject {index}   {stage} {entry['frames']} frame(s) at {size}   "
+                         f"{plan_store.stage_dir(job, index, stage)}")
+        if len(order) > 1:
+            carried = ", ".join(f"subject {i}" for i in order[:-1])
+            lines.append(f"final result: subject {final}'s stitched frames   those {frames} "
+                         f"frame(s) already carry {carried} composited into them")
+        else:
+            lines.append(f"final result: subject {final}'s stitched frames   this job has one "
+                         f"pass, so those {frames} frame(s) are it on the target clip")
+        for pair in warnings:
+            lines.append(
+                f"overlap warning: subject {pair['a']} and subject {pair['b']} crop regions share "
+                f"{_percent(pair['overlap'])} of their combined area at match frame {frame}, past "
+                f"the {float(overlap_threshold):g} set here - if they are two people, one pass's "
+                f"feathered edge lands on the other's refined pixels")
+        if not warnings:
+            lines.append(f"no overlapping subject crop regions at match frame {frame} "
+                         f"(threshold {float(overlap_threshold):g})")
+        lines.append("audio: the finished clip carries the target clip's audio. Each pass's "
+                     "generated audio was discarded - these nodes only ever carry image batches, "
+                     "so wire the target clip's own audio into your save node.")
+
+        report = "\n".join(lines)
+        print("[H3MultiFaceComposite] " + report.replace("\n", "\n[H3MultiFaceComposite] "))
+        return (finished, report, final, len(order))
+
+
 NODE_CLASS_MAPPINGS = {"H3MultiFacePlan": H3MultiFacePlan,
                        "H3SubjectSelect": H3SubjectSelect,
                        "H3PassSave": H3PassSave,
-                       "H3PassLoad": H3PassLoad}
+                       "H3PassLoad": H3PassLoad,
+                       "H3MultiFaceComposite": H3MultiFaceComposite}
 NODE_DISPLAY_NAME_MAPPINGS = {"H3MultiFacePlan": "H3 Multi-Face Plan",
                               "H3SubjectSelect": "H3 Subject Select",
                               "H3PassSave": "H3 Pass Save",
-                              "H3PassLoad": "H3 Pass Load"}
+                              "H3PassLoad": "H3 Pass Load",
+                              "H3MultiFaceComposite": "H3 Multi-Face Composite"}
 
 
