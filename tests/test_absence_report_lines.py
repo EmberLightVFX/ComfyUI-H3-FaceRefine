@@ -100,6 +100,26 @@ def test_a_lost_shot_shows_up_once_this_subject_has_crop_positions(tmp_path):
     assert account["lost"] == [2]
 
 
+def test_the_lost_line_says_shot_frames_cause_and_fix_once_each(tmp_path):
+    """#6 left this debt: the lost line chained three clauses and read heavier than its sibling.
+
+    One clause of cause and one of fix, the fix joined by a semicolon - and nothing given up:
+    which shot, which frames, how many of them, why, and which widgets would change it. The
+    absence line beside it has always read in two clauses, so the two now weigh the same.
+    """
+    job = str(tmp_path / "job")
+    ps.write_positions(job, 0, _positions([False] * 6 + [False] * 6, [True] * 6 + [False] * 6))
+    lines, _account = m.shot_account_lines(_plan(), 0, job_dir=job, pick=_narrowed([False, False]))
+    line = next(text for text in lines if "was lost" in text)
+    assert line.endswith(
+        "subject 0 was lost in shot 2 (frames 6-11): 6 of 6 frame(s) produced nobody"
+        " - faces were detected in this shot but none of them matched this subject's identity;"
+        " check identity_track and identity_threshold, or lower confidence,"
+        " on H3 Face Track + Crop")
+    # The doubled diagnosis is what made the sentence heavy: `lost` was said three times over.
+    assert "the tracker stopped finding them there" not in line
+
+
 def test_planned_absence_and_a_lost_track_are_tellible_apart_in_one_pass():
     """The acceptance criterion in one report: both kinds of empty shot, same subject, same pass,
     and nothing ambiguous about which is which."""
