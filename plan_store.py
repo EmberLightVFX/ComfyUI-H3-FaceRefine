@@ -1283,10 +1283,6 @@ def positions_path(job_dir, subject) -> str:
     return os.path.join(pass_dir(job_dir, subject), POSITIONS_FILENAME)
 
 
-def empty_manifest() -> dict:
-    return {"version": MANIFEST_VERSION, "passes": {}}
-
-
 def _manifest_passes(manifest: dict, job_dir) -> dict:
     passes = manifest.get("passes")
     if passes is None:
