@@ -221,11 +221,11 @@ Model lookups go through ComfyUI's `folder_paths`, so anything registered in
 | `person_yolov8m-seg.pt` *(optional for the nodes, but both templates ship it wired as `fallback_detector`)* | `models/ultralytics/segm/` | [Bingsu/adetailer](https://huggingface.co/Bingsu/adetailer/blob/main/person_yolov8m-seg.pt) |
 | an anime face detector *(optional, anime and other illustration)* | `models/ultralytics/bbox/` | [deepghs/anime_face_detection](https://huggingface.co/deepghs/anime_face_detection), or Anzhc's face-seg models. `face_yolov8m.pt` may not find anime faces — see [Anime and other non-photographic material](#anime-and-other-non-photographic-material) |
 | a CLIP Vision model *(optional, only for `identity_model = clip_vision`)* | `models/clip_vision/` | any CLIP Vision model, wired through a `CLIPVisionLoader`. You probably already have one for IPAdapter or Redux |
-| MiniMax H3 diffusion model | `models/diffusion_models/` | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) |
-| Qwen3-VL text encoder | `models/text_encoders/` | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+| `minimax_h3_fl2va_pruned_int8_convrot.safetensors` *(the frame+last-frame-to-video model, int8 — this is what the example workflows load)* | `models/diffusion_models/` | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) |
+| `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` *(Qwen3-VL text encoder, nvfp4_awq — what the example workflows load)* | `models/text_encoders/` | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3) |
 | `minimax_h3_video_vae_fp16.safetensors` | `models/vae/` | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/vae) |
 | `minimax_h3_audio_vae_fp32.safetensors` | `models/vae/` | [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/vae) |
-| a turbo LoRA *(optional, big speed-up)* | `models/loras/` | [Kijai/MiniMax-H3_comfy](https://huggingface.co/Kijai/MiniMax-H3_comfy/tree/main/loras), distilled by [lightx2v](https://huggingface.co/lightx2v/Minimax-h3-Turbo). The example workflows ship the **8-step v1.0** at strength `1.0`, with `BasicScheduler` set to 8 steps to match — the step count must follow whichever turbo LoRA you load |
+| `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors` *(optional turbo LoRA, big speed-up)* | `models/loras/` | [Kijai/MiniMax-H3_comfy](https://huggingface.co/Kijai/MiniMax-H3_comfy/tree/main/loras), distilled by [lightx2v](https://huggingface.co/lightx2v/Minimax-h3-Turbo). The example workflows ship this **8-step v1.0** at strength `1.0`, with `BasicScheduler` set to 8 steps to match — the step count must follow whichever turbo LoRA you load |
 | `sam_vit_b_01ec64.pth` *(optional, only if you unmute the SAM mask pair)* | `models/sams/` | [Meta segment-anything](https://github.com/facebookresearch/segment-anything#model-checkpoints) |
 | InsightFace `buffalo_l` *(optional, crowd tracking on photographed faces)* | `models/insightface/` | downloaded automatically on first use. Backs `identity_model = insightface`; on illustration use `clip_vision` or `ccip` instead |
 
@@ -233,9 +233,19 @@ H3's original weights are [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxA
 Comfy-Org repository above is the repackaged form ComfyUI expects. The example workflows load the
 model and text encoder through the stock `UNETLoader` and `CLIPLoader`. Their stored values name the
 specific quantisations the examples were built against, so unless you happen to have those exact
-files you will need to re-pick both loaders after opening a template. A **GGUF** pair
-([ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)) sits beside them, muted, with a note:
+files you will need to re-pick both loaders after opening a template. Each stored value is a **bare
+filename with no subfolder**, because that is where the table above says the file goes: a loader
+resolves its value inside its own folder, so a name carrying a subfolder asks for a path no
+installer creates. A test asserts every active loader in every shipped template follows that rule.
+A **GGUF** pair ([ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)) sits beside them, muted, with a note:
 unmute it and mute the stock pair to fit H3 in 12 GB.
+
+**If a template fails validation on load, check which of the two it is**, because the fix is
+different and the error looks the same. Either a *dependency* is missing, so a stored name is not in
+any dropdown — the usual cause is [ComfyUI-Impact-Pack](https://github.com/ltdrdata/ComfyUI-Impact-Pack)
+not being installed, which is what registers `models/ultralytics/bbox/` and makes
+`bbox\face_yolov8m.pt` resolvable — or you simply hold *different files*, in which case re-pick the
+loader to whatever you do have. Neither means the template itself is broken.
 
 Only the face detector is genuinely required by the nodes themselves. Everything else is needed
 because the pipeline runs H3, so if you are already generating H3 video you will have it already.

@@ -190,3 +190,96 @@ def test_agents_md_does_not_undercount_the_nodes_it_describes():
     for claim in re.finditer(r"(\d+)\s+node classes?", AGENTS):
         assert int(claim.group(1)) == total, \
             f"AGENTS.md claims {claim.group(0)!r}; the pack registers {total}"
+
+
+# --------------------------------------------------------------- template model paths
+#
+# A loader widget's stored value is resolved against the folder that loader searches, so a value
+# like `MiniMax H3\file.safetensors` on a VAELoader asks for `models/vae/MiniMax H3/file.safetensors`.
+# Every shipped template carried exactly that on four active loaders, for two releases: the files
+# were installed correctly, in the right folder, under the right name, and the templates still
+# refused to load. Nothing caught it, because the README already warns that you may have to
+# re-pick loaders after opening a template - so a validation error reads as expected housekeeping
+# rather than as a defect in the shipped files.
+#
+# Muted nodes are deliberately NOT checked (ComfyUI marks a muted node with a non-zero `mode`).
+# The GGUF and SAM pairs ship muted on purpose, the README says so, and their stored values name
+# quantisations the pack does not recommend - guarding them would force the README to document
+# optional files it pointedly leaves out.
+
+MODEL_LOADERS = {
+    "UNETLoader": 0, "VAELoader": 0, "CLIPLoader": 0,
+    "LoraLoaderModelOnly": 0, "CheckpointLoaderSimple": 0,
+}
+
+
+def _muted(node) -> bool:
+    """ComfyUI's mute flag: absent or zero means the node runs."""
+    return bool(node.get("mode", 0))
+
+
+def _active_loader_paths(workflow) -> list:
+    """`(stored value, node type)` for every model path a running loader node holds."""
+    found = []
+    for node in workflow.get("nodes") or []:
+        index = MODEL_LOADERS.get(node.get("type"))
+        if index is None or _muted(node):
+            continue
+        widgets = node.get("widgets_values") or []
+        assert index < len(widgets), f"{node.get('type')}: no widget at {index}"
+        value = widgets[index]
+        assert isinstance(value, str), f"{node.get('type')}: {value!r} is not a model name"
+        found.append((value, node["type"]))
+    return found
+
+
+def test_shipped_workflows_store_bare_model_names_the_readme_names():
+    """A subfolder inside a stored model name asks for a folder no installer creates.
+
+    The README's model table is flat - one folder per loader type, model names written bare. A
+    template that files a model under a subfolder of that folder resolves to a path that cannot
+    exist, which is the bug #12 is about.
+    """
+    checked = 0
+    for path in sorted(EXAMPLE_DIR.glob("*.json")):
+        with open(path, encoding="utf-8") as handle:
+            workflow = json.load(handle)
+        for value, node_type in _active_loader_paths(workflow):
+            checked += 1
+            assert "\\" not in value and "/" not in value, (
+                f"{path.name}: {node_type} stores {value!r}. A model name in a shipped template "
+                f"is bare: the loader's own folder is the only folder it may carry.")
+            assert value in README, (
+                f"{path.name}: {node_type} stores {value!r}, which the README never names - so "
+                f"the template asks for a file the install guide does not even tell you to fetch.")
+    # A guard that has quietly stopped matching any node is worse than no guard at all.
+    assert checked >= 12, f"only {checked} active loader paths found across the templates"
+
+
+def test_the_templates_all_load_the_same_text_encoder():
+    """The text encoder is the one stored path that was always right, so pin it.
+
+    Without this, the guard above would still pass if one template drifted to a different encoder
+    than the others, and a reader comparing templates would have no idea which one the pack means.
+    """
+    encoders = set()
+    for path in sorted(EXAMPLE_DIR.glob("*.json")):
+        with open(path, encoding="utf-8") as handle:
+            workflow = json.load(handle)
+        for value, node_type in _active_loader_paths(workflow):
+            if node_type == "CLIPLoader":
+                encoders.add(value)
+    assert encoders, "no active CLIPLoader in any shipped template"
+    assert len(encoders) == 1, f"the shipped templates disagree about the text encoder: {encoders}"
+    assert next(iter(encoders)) in README, encoders
+
+
+def test_a_muted_node_is_not_checked():
+    """The GGUF and SAM pairs ship muted on purpose, so their paths are not the pack's promise."""
+    workflow = {"nodes": [
+        {"type": "VAELoader", "mode": 2, "widgets_values": ["MiniMax H3\\gone.safetensors"]},
+        {"type": "VAELoader", "widgets_values": ["minimax_h3_video_vae_fp16.safetensors"]},
+    ]}
+    assert _active_loader_paths(workflow) == [("minimax_h3_video_vae_fp16.safetensors",
+                                               "VAELoader")]
+
