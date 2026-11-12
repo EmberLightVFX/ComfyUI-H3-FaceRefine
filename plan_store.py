@@ -611,5 +611,383 @@ def next_subject(plan, job_dir):
         if int(subject["index"]) not in done:
             return subject
     return None
+# ----------------------------------------------------------------------------
+# the pass manifest: the WRITE side, and the pass layout inside the job folder
+# ----------------------------------------------------------------------------
+#
+#   <job folder>/
+#     manifest.json
+#     passes/subject_0000/crops/frame_0000.png     <- what H3 was fed, one PNG per frame
+#     passes/subject_0000/crops.json               <- the crop positions (H3FACEXFORM)
+#     passes/subject_0000/stitched/frame_0000.png  <- the pass composited back on the clip
+#
+# Names are deterministic and zero-padded, never timestamped: re-running a pass overwrites
+# its own frames instead of leaving a second copy nobody can line up with frame 7, and every
+# image is an ordinary PNG a user can open to see what H3 was actually given.
+
+PASS_STAGES = ("crops", "stitched")
+PASSES_DIRNAME = "passes"
+POSITIONS_FILENAME = "crops.json"
+FRAME_EXTENSION = ".png"
 
 
+def _subject_index(subject) -> int:
+    try:
+        index = int(subject)
+    except (TypeError, ValueError):
+        raise ValueError(f"subject must be a subject number, got {subject!r}") from None
+    if index < 0:
+        raise ValueError(f"subject cannot be negative, got {index}")
+    return index
+
+
+def checked_stage(stage) -> str:
+    name = str(stage)
+    if name not in PASS_STAGES:
+        raise ValueError(
+            f"stage must be one of {' | '.join(PASS_STAGES)}, got {stage!r}. crops is what "
+            f"H3 was fed; stitched is that pass composited back onto the clip.")
+    return name
+
+
+def pass_dir(job_dir, subject) -> str:
+    """One subject's folder inside the job."""
+    return os.path.join(str(job_dir), PASSES_DIRNAME,
+                        f"subject_{_subject_index(subject):04d}")
+
+
+def stage_dir(job_dir, subject, stage) -> str:
+    return os.path.join(pass_dir(job_dir, subject), checked_stage(stage))
+
+
+def frame_name(index) -> str:
+    """The name of one frame of a pass: viewable, ordered, and stable across a resume."""
+    return f"frame_{int(index):04d}{FRAME_EXTENSION}"
+
+
+def stage_files(job_dir, subject, stage, count) -> list[str]:
+    """The paths of ``count`` frames of one stage, in frame order."""
+    folder = stage_dir(job_dir, subject, stage)
+    return [os.path.join(folder, frame_name(i)) for i in range(int(count))]
+
+
+def positions_path(job_dir, subject) -> str:
+    """Where a subject's crop positions are kept, readable, next to their frames."""
+    return os.path.join(pass_dir(job_dir, subject), POSITIONS_FILENAME)
+
+
+def empty_manifest() -> dict:
+    return {"version": MANIFEST_VERSION, "passes": {}}
+
+
+def _manifest_passes(manifest: dict, job_dir) -> dict:
+    passes = manifest.get("passes")
+    if passes is None:
+        passes = manifest["passes"] = {}
+    if not isinstance(passes, dict):
+        raise ValueError(
+            f"{manifest_path(job_dir)} has no 'passes' object, so its record of completed "
+            f"passes cannot be read")
+    return passes
+
+
+def write_manifest(job_dir, manifest: dict) -> str:
+    """Write the manifest whole, through a temporary name, exactly like the plan is written.
+
+    A job that dies mid-write must not leave half a manifest behind that the next pass reads
+    as "this subject is done" and skips it.
+    """
+    if not isinstance(manifest, dict):
+        raise ValueError(f"a pass manifest is a dict, got {type(manifest).__name__}")
+    folder = str(job_dir)
+    os.makedirs(folder, exist_ok=True)
+    final = manifest_path(folder)
+    staging = final + ".writing"
+    with open(staging, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2, default=_json_default)
+        fh.write("\n")
+    os.replace(staging, final)
+    return final
+
+
+def record_pass_stage(job_dir, subject, stage, record=None) -> dict:
+    """Record one subject's stage as written to disk, and return the manifest it wrote.
+
+    ``complete`` is DERIVED here, never handed in: a pass is complete once its stitched stage
+    is recorded and not before. The whole resume cursor rests on that rule, so it is computed
+    in one place rather than left to each caller to get right. ``record`` is the caller's note
+    of what landed on disk - frame count, file names - and is stored as given.
+    """
+    index = _subject_index(subject)
+    name = checked_stage(stage)
+    manifest = read_manifest(job_dir)
+    passes = _manifest_passes(manifest, job_dir)
+    key = str(index)
+
+    entry = passes.get(key)
+    if not isinstance(entry, dict):
+        # The read side forgives a bare `true` as complete. Such a record can only honestly
+        # mean the stitched stage was written without detail, so keep the completion rather
+        # than quietly unwinding a subject's finished pass.
+        entry = {"stages": ({"stitched": {}} if _pass_is_complete(entry) else {})}
+    stages = entry.get("stages")
+    if not isinstance(stages, dict):
+        stages = {}
+    if record is None:
+        stages[name] = {}
+    elif isinstance(record, dict):
+        stages[name] = dict(record)
+    else:
+        stages[name] = {"record": record}
+    entry["stages"] = stages
+    entry["complete"] = "stitched" in stages
+    passes[key] = entry
+    manifest.setdefault("version", MANIFEST_VERSION)
+    write_manifest(job_dir, manifest)
+    return manifest
+
+
+def _manifest_entry(job_dir, subject):
+    passes = read_manifest(job_dir).get("passes")
+    if not isinstance(passes, dict):
+        return None
+    return passes.get(str(_subject_index(subject)))
+
+
+def manifest_stage_record(job_dir, subject, stage):
+    """What the manifest records for one subject's stage, or ``None`` when it records none.
+
+    The question Pass Load asks before it looks for a single file on disk. A record written
+    by an older manifest that only says "complete" still counts for the stitched stage.
+    """
+    entry = _manifest_entry(job_dir, subject)
+    name = checked_stage(stage)
+    if isinstance(entry, dict):
+        stages = entry.get("stages")
+        if isinstance(stages, dict) and name in stages:
+            return stages[name]
+        return True if (name == "stitched" and entry.get("complete")) else None
+    return {} if (_pass_is_complete(entry) and name == "stitched") else None
+
+
+def pass_is_complete(job_dir, subject) -> bool:
+    """Does the manifest record this subject's pass as complete (stitched stage and all)?"""
+    return _pass_is_complete(_manifest_entry(job_dir, subject))
+
+
+def plan_subject_indices(plan) -> list[int]:
+    """The subject numbers this plan actually has."""
+    return [int(subject["index"]) for subject in (plan or {}).get("subjects") or []]
+
+
+def check_manifest_subjects(plan, job_dir) -> list[int]:
+    """Raise when the manifest names a subject this plan does not have.
+
+    `completed_subjects` deliberately ignores manifest keys the plan does not know - "who is
+    next" must not be held hostage by a stray record. A pass about to WRITE into that
+    subject's folder is a different matter: a stale entry is how two jobs in one output tree
+    start reading each other's passes. Returns the recorded subject indices.
+    """
+    passes = read_manifest(job_dir).get("passes") or {}
+    if not isinstance(passes, dict):
+        raise ValueError(
+            f"{manifest_path(job_dir)} has no 'passes' object, so its record of completed "
+            f"passes cannot be read")
+    known = set(plan_subject_indices(plan))
+    stray = []
+    for key in passes:
+        try:
+            index = int(key)
+        except (TypeError, ValueError):
+            stray.append(repr(key))
+            continue
+        if index not in known:
+            stray.append(index)
+    if stray:
+        raise ValueError(
+            f"{manifest_path(job_dir)} records a pass for subject(s) "
+            f"{', '.join(str(i) for i in stray)}, which this plan does not have - its "
+            f"subjects are {', '.join(str(i) for i in sorted(known)) or 'none'}. That "
+            f"manifest came from another plan, or this job was re-planned. Set job_name to a "
+            f"new job, or delete the manifest to start the bookkeeping over.")
+    return sorted(int(key) for key in passes)
+
+
+# ----------------------------------------------------------------------------
+# one pass's crop positions: the H3FACEXFORM record as readable JSON
+# ----------------------------------------------------------------------------
+#
+# Not a pickle and not a tensor: `crops.json` is readable in an editor, and it is what lets a
+# resumed pass stitch its frames back without running the tracker again. `canvas` and
+# `src_size` are tuples in the live payload and `segments` is a list of them; JSON has only
+# arrays, so they are restored on the way back in and the payload a resumed pass gets is the
+# one the tracker built.
+
+_TUPLE_FIELDS = ("canvas", "src_size")
+# Per-frame lists whose entries were tuples when the tracker built them. Restored by arity:
+# `segments` is (start, end) in whole frames, `face_rect` is a float rect in canvas pixels.
+_TUPLE_ENTRY_FIELDS = {"segments": (2, int), "face_rect": (4, float)}
+
+
+def write_positions(job_dir, subject, transform) -> str:
+    """Write one subject's crop positions (the ``H3FACEXFORM`` record) as readable JSON."""
+    if not isinstance(transform, dict):
+        raise ValueError(f"the crop positions of a pass are a dict, got "
+                         f"{type(transform).__name__}")
+    path = positions_path(job_dir, subject)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    staging = path + ".writing"
+    with open(staging, "w", encoding="utf-8") as fh:
+        json.dump(transform, fh, indent=2, default=_json_default)
+        fh.write("\n")
+    os.replace(staging, path)
+    return path
+
+
+def read_positions(job_dir, subject) -> dict:
+    """The crop positions back off disk, tuples restored.
+
+    A missing one is a real gap, not an empty answer: without the positions a stitched pass
+    cannot be put back where it came from, so it says so rather than returning ``{}``.
+    """
+    path = positions_path(job_dir, subject)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"no crop positions at {path}. Without them the crops cannot be stitched back "
+            f"where they came from. Run H3 Pass Save with stage=crops for this subject, with "
+            f"transform wired from H3 Face Track + Crop.")
+    with open(path, encoding="utf-8") as fh:
+        try:
+            payload = json.load(fh)
+        except ValueError:
+            raise ValueError(
+                f"{path} is not readable JSON. Delete it and re-run H3 Pass Save with "
+                f"stage=crops for this subject.") from None
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path} does not hold a crop-position record")
+    for field in _TUPLE_FIELDS:
+        value = payload.get(field)
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            payload[field] = (int(value[0]), int(value[1]))
+    for field, (arity, cast) in _TUPLE_ENTRY_FIELDS.items():
+        value = payload.get(field)
+        if isinstance(value, list):
+            payload[field] = [tuple(cast(v) for v in part) for part in value
+                              if isinstance(part, (list, tuple)) and len(part) == arity]
+    return payload
+
+
+
+
+
+
+# ----------------------------------------------------------------------------
+# the pairing fingerprint: refuse before two pairings mix in one job folder
+# ----------------------------------------------------------------------------
+#
+# A job folder is a promise: the plan, the subject references and every pass under `passes/`
+# were decided from the SAME plates, the SAME match frame and the SAME exclusions. Change one
+# widget and re-run with the same job_name and the new pairing writes its passes beside the
+# old ones, then stitches two different ideas of who is who into one clip. So the inputs that
+# decide the pairing get a fingerprint, and every pass checks it.
+#
+# `max_subjects` is deliberately NOT part of it: it is recorded and not applied (#10), so
+# changing it changes nothing on disk. What it would change is the subject set below, which is
+# compared whatever the widgets say.
+
+PAIRING_INPUT_FIELDS = ("target_size", "still_size", "match_frame", "subject_source",
+                        "match_tolerance", "excluded_faces")
+
+
+def _normalise(value):
+    """One input, made to read the same from a plan in memory as from plan.json."""
+    if isinstance(value, (list, tuple)):
+        return [_normalise(v) for v in value]
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, np.floating):
+        value = float(value)
+    if isinstance(value, float):
+        return round(float(value), 6)
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if value is None:
+        return None
+    return str(value)
+
+
+def pairing_fingerprint(plan) -> dict:
+    """The part of a plan that says WHICH pairing this job was planned on.
+
+    Both plate sizes, the match frame, the seeding plate, the tolerance, the exclusions, and
+    the subject set itself - index, clip face and still face for every subject. The subject
+    set is in here because it is what actually breaks: a re-detect that pairs someone else at
+    the same widgets is still a different job.
+    """
+    inputs = (plan or {}).get("inputs") or {}
+    record = {}
+    for field in PAIRING_INPUT_FIELDS:
+        value = inputs.get(field)
+        if value is None:
+            value = (plan or {}).get(field)
+        record[field] = _normalise(value)
+    record["subjects"] = [[_normalise((subject or {}).get("index")),
+                           _normalise((subject or {}).get("clip_face")),
+                           _normalise((subject or {}).get("still_face"))]
+                          for subject in (plan or {}).get("subjects") or []]
+    return record
+
+
+def _describe(value) -> str:
+    return json.dumps(value, sort_keys=True)
+
+
+def _subjects_line(before: list, after: list) -> str:
+    def label(row) -> str:
+        index, clip_face, still_face = row
+        return f"subject {index} (clip face {clip_face}, still face {still_face})"
+
+    moved_out = [row for row in before if row not in after]
+    moved_in = [row for row in after if row not in before]
+    parts = []
+    if moved_out:
+        parts.append("in the job folder: " + "; ".join(label(row) for row in moved_out))
+    if moved_in:
+        parts.append("in this plan: " + "; ".join(label(row) for row in moved_in))
+    if not parts:
+        parts.append(f"the same {len(before)} subject(s), paired differently")
+    return "subject set: " + " | ".join(parts)
+
+
+def fingerprint_difference(stored_plan, current_plan) -> list[str]:
+    """Every pairing input the two plans disagree about, one line each.
+
+    Empty means the same pairing: re-planning it into the same job folder is a resume, not a
+    mix, and has to be allowed or no job could ever be re-run.
+    """
+    before = pairing_fingerprint(stored_plan)
+    after = pairing_fingerprint(current_plan)
+    lines = []
+    for field in PAIRING_INPUT_FIELDS:
+        if before[field] != after[field]:
+            lines.append(f"{field}: the job folder has {_describe(before[field])}, this plan "
+                         f"has {_describe(after[field])}")
+    if before["subjects"] != after["subjects"]:
+        lines.append(_subjects_line(before["subjects"], after["subjects"]))
+    return lines
+
+
+def check_pairing_inputs(stored_plan, current_plan, job_dir, advice: str) -> None:
+    """Raise unless the plan in the graph and the plan in the job folder are one pairing.
+
+    ``advice`` is what the caller can do about it, and it differs per node: the plan node is
+    the one that would overwrite, a pass is the one that would mix.
+    """
+    lines = fingerprint_difference(stored_plan, current_plan)
+    if not lines:
+        return None
+    raise ValueError(
+        f"{plan_path(job_dir)} was written from different pairing inputs, so this would mix "
+        f"two pairings into one job folder:\n"
+        + "\n".join(f"  - {line}" for line in lines)
+        + f"\n{advice}")
