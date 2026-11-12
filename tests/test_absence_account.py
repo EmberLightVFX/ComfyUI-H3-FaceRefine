@@ -84,7 +84,6 @@ def _pick(absent_flags, faces_per_frame: int = 1, segments=SHOTS, frames: int = 
         "frames": frames,
         "src_size": (128, 128),
         "select_index": 0,
-        "plan_match_frame": 2,
     }
 
 

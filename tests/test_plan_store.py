@@ -289,6 +289,72 @@ def test_the_excluded_faces_widget_is_read_as_a_typed_list():
     assert "bystander" in str(exc.value)
 
 
+# --- an exclusion can name a face on EITHER plate (#11 review, P4; spec story 6) ------
+
+def test_an_s_index_is_a_reference_still_face_and_a_bare_number_is_a_clip_face():
+    """Two plates, two numberings, and one widget. `s2` is the still's face 2 as numbered on the
+    pairing preview; a bare 2 stays the clip's face 2, exactly as it always was."""
+    assert ps.parse_excluded_faces("2, s3, s1, 0") == [2, "s3", "s1", 0]
+    assert ps.parse_excluded_faces("S1") == ["s1"]
+    assert ps.parse_excluded_faces(["s0", 1]) == ["s0", 1]
+    with pytest.raises(ValueError) as exc:
+        ps.parse_excluded_faces("ss2")
+    assert "ss2" in str(exc.value)
+
+
+def test_an_s_index_switches_off_a_face_only_the_reference_still_saw():
+    """Spec story 6: `union` seeds every face on either plate, so a bystander who is in the photo
+    and never in the clip became a subject that could not be switched off. `s2` switches it off."""
+    still = STILL_BOXES + [[1800, 1800, 1900, 1900]]      # a face the clip never saw
+
+    kept = _plan(still_boxes=still, unmatched_faces="no_reference")
+    off = _plan(still_boxes=still, unmatched_faces="no_reference", excluded=["s2"])
+
+    assert 2 in [s["still_face"] for s in kept["subjects"]]
+    assert 2 not in [s["still_face"] for s in off["subjects"]]
+    assert off["subject_count"] == kept["subject_count"] - 1
+    # Both kinds land in the plan and in the fingerprint, and the still one stays a still one.
+    assert off["excluded_faces"] == ["s2"]
+    assert off["inputs"]["excluded_faces"] == ["s2"]
+
+
+def test_an_s_index_on_a_paired_face_drops_the_pair_it_belongs_to():
+    """A switched-off detection cannot pair, so the person it was matched to falls to whatever
+    `unmatched_faces` says - which is what switching a face off has to mean."""
+    plan = _plan(excluded=["s0"], unmatched_faces="no_reference")
+
+    assert [(s["clip_face"], s["still_face"]) for s in plan["subjects"]] == [(0, 1), (1, None),
+                                                                            (2, None)]
+    assert plan["subjects"][2]["ref_kind"] == ps.REF_NONE
+
+
+def test_an_out_of_range_index_names_the_plate_it_was_checked_against():
+    """`s9` against a two-face still and a bare 9 against a three-face clip are different
+    mistakes; each message says which plate was counted and how to name the other one."""
+    with pytest.raises(ValueError) as exc:
+        _plan(excluded=["s2"])
+    message = str(exc.value)
+    assert "reference still face 2" in message and "0-1" in message
+
+    with pytest.raises(ValueError) as exc:
+        _plan(excluded=["s-1"])
+    assert "reference still face -1" in str(exc.value)
+
+    with pytest.raises(ValueError) as exc:
+        _plan(excluded=[9])
+    assert "target clip face 9" in str(exc.value)
+    assert "s9" in str(exc.value)
+
+
+def test_a_bare_index_still_means_the_target_clip_exactly_as_before():
+    """Nothing about the released behaviour moves: the same exclusions, the same plan."""
+    plan = _plan(excluded=[1])
+
+    assert [s["clip_face"] for s in plan["subjects"]] == [0, 2]
+    assert plan["excluded_faces"] == [1] and plan["inputs"]["excluded_faces"] == [1]
+    assert _plan(excluded=[1])["subjects"] == plan["subjects"]
+
+
 def test_max_subjects_is_recorded_and_applied():
     """#10 reversed this test. The cap is not decoration: it truncates the ordered subject set
     here, so every downstream stage - the subject combo, `next`, the manifest, the composite
@@ -330,7 +396,9 @@ def test_the_plan_carries_a_version_and_the_pairing_inputs():
                               "match_frame": 12, "subject_source": "union",
                               "match_tolerance": 0.05, "excluded_faces": [1],
                               "max_subjects": 4,
-                              "unmatched_faces": ps.DEFAULT_UNMATCHED_FACES}
+                              "unmatched_faces": ps.DEFAULT_UNMATCHED_FACES,
+                              # The rectangle the subject references were cut with (#11 review).
+                              "crop_factor": ps.DEFAULT_CROP_FACTOR}
     assert plan["scale"] == pytest.approx(0.5)
     # The match-frame measurements stay in the plan so a later pass can rebuild one
     # subject's pick without re-detecting anything.
@@ -394,6 +462,21 @@ def test_the_plan_round_trips_through_the_job_folder(tmp_path):
     assert os.path.basename(written) == ps.PLAN_FILENAME
     assert ps.read_plan(job) == plan
 
+def test_an_exclusion_of_either_plate_round_trips_and_stays_its_own_job(tmp_path):
+    """`s` tokens are JSON like any other, and the fingerprint tells an `s2` job from a 2 job -
+    otherwise a resume would read a still-side switch-off as a clip-side one."""
+    mixed = _plan(excluded=["s2", 1], still_boxes=STILL_BOXES + [[1800, 1800, 1900, 1900]],
+                  unmatched_faces="no_reference")
+    job = ps.job_dir_for(tmp_path, "bystanders")
+    ps.write_plan(job, mixed)
+    back = ps.read_plan(job)
+
+    assert back == mixed
+    assert back["excluded_faces"] == [1, "s2"] == back["inputs"]["excluded_faces"]
+    assert ps.pairing_fingerprint(back) == ps.pairing_fingerprint(mixed)
+    assert ps.fingerprint_difference(back, _plan(excluded=[2])) != []
+
+
 
 def test_a_written_plan_carries_a_version_even_when_nobody_mentioned_one(tmp_path):
     path = ps.write_plan(str(tmp_path), {"subjects": []})
@@ -418,4 +501,138 @@ def test_a_plan_folder_is_not_forgotten_when_the_inputs_change(tmp_path):
     assert back["inputs"]["match_tolerance"] == 0.11
     assert back["inputs"]["subject_source"] == "target_clip"
     assert back["inputs"]["max_subjects"] == 3
+
+
+# --- the fingerprint covers the pairing EVIDENCE, not only the widgets (#11 review, P2) --
+
+def _with_run(plan, detector="face_yolov8m.pt", confidence=0.35):
+    """What the plan node writes into `run`, which is where the detector lives."""
+    plan["run"] = dict(plan.get("run") or {}, job_name="group shot", frames=4,
+                       detector=detector, confidence=confidence)
+    return plan
+
+
+def test_a_different_still_of_the_same_size_refuses_rather_than_resumes(tmp_path):
+    """A nudged still keeps the SAME subject indices and still pairs everyone, so comparing the
+    indices alone would call this the same job. It is not: the passes were cut from a pairing
+    that measured different boxes."""
+    job = ps.job_dir_for(tmp_path, "group shot")
+    ps.write_plan(job, _with_run(_plan()))
+    moved = _with_run(_plan(still_boxes=[[1600, 240, 1800, 480], [210, 210, 410, 450]]))
+
+    # Same subjects, same widgets - only the measured boxes moved.
+    assert ([s["index"] for s in moved["subjects"]]
+            == [s["index"] for s in ps.read_plan(job)["subjects"]])
+    lines = ps.fingerprint_difference(ps.read_plan(job), moved)
+    assert any(line.startswith("still_boxes: ") for line in lines)
+    assert "first difference at face 1" in "\n".join(lines)
+    # The box that moved is named; the boxes that did not are not dumped at the reader.
+    assert "[210.0, 210.0, 410.0, 450.0]" in "\n".join(lines)
+    assert "[1600.0, 240.0, 1800.0, 480.0]" not in "\n".join(lines)
+
+
+def test_a_different_detector_or_confidence_refuses_naming_it(tmp_path):
+    """Another detector can pair different faces into the same indices, so the run record is
+    part of the fingerprint and not a detail of the report."""
+    job = ps.job_dir_for(tmp_path, "group shot")
+    ps.write_plan(job, _with_run(_plan()))
+
+    lines = ps.fingerprint_difference(ps.read_plan(job),
+                                      _with_run(_plan(), detector="face_yolov8s.pt"))
+    assert any(line.startswith("detector: ") for line in lines)
+
+    lines = ps.fingerprint_difference(ps.read_plan(job),
+                                      _with_run(_plan(), confidence=0.25))
+    assert any(line.startswith("confidence: ") for line in lines)
+
+
+def test_an_identical_pairing_resumes_clean(tmp_path):
+    """Same plates, same boxes, same detector, same cap: re-running the plan into its own job
+    folder is a resume, and has to stay possible or no job could ever be re-run."""
+    stored = _with_run(_plan(excluded=[1], max_subjects=2))
+    job = ps.job_dir_for(tmp_path, "group shot")
+    ps.write_plan(job, stored)
+
+    current = _with_run(_plan(excluded=[1], max_subjects=2))
+    assert ps.fingerprint_difference(ps.read_plan(job), current) == []
+    ps.check_pairing_inputs(ps.read_plan(job), current, job, "act on it")
+
+
+def test_the_crop_factor_the_references_were_cut_at_is_part_of_the_fingerprint(tmp_path):
+    """A job folder holds subject references cut at one factor; a plan at another factor would
+    write new references beside passes cut from the old ones."""
+    job = ps.job_dir_for(tmp_path, "group shot")
+    ps.write_plan(job, _plan())
+
+    assert ps.fingerprint_difference(ps.read_plan(job), _plan()) == []
+    lines = ps.fingerprint_difference(ps.read_plan(job), _plan(crop_factor=1.5))
+    assert any(line.startswith("crop_factor: ") for line in lines)
+
+    # A version 2 folder recorded no factor at all, and used the shipped default - which is what
+    # an untouched plan today also uses, so that folder is still the same job.
+    old = _plan()
+    old["version"] = 2
+    del old["inputs"]["crop_factor"]
+    ps.write_plan(job, old)
+    assert ps.fingerprint_difference(ps.read_plan(job), _plan()) == []
+
+
+# --- the tracker's crop_factor, asked of the plan (#11 review, P1) --------------------
+
+def test_the_plan_cuts_subject_references_at_the_crop_factor_it_is_given():
+    """The tracker takes `crop_factor` from a widget, so the plan cannot assume 2.5: a subject
+    reference framed at the wrong factor puts the detail it carries somewhere else in the crop."""
+    default = _plan()
+    tight = _plan(crop_factor=1.5)
+
+    # clip face 0 is 120px tall: at 1.5 that is an 180px square centred on (150, 160), where
+    # the shipped default gives a 300px square pushed up against the frame's top-left.
+    assert ps.subject_crop_rect(default, default["subjects"][0]) == [0.0, 10.0, 300.0, 300.0]
+    assert ps.subject_crop_rect(tight, tight["subjects"][0]) == [60.0, 70.0, 180.0, 180.0]
+    assert default["subjects"][0]["ref_crop"] == [0, 20, 600, 600]
+    assert tight["subjects"][0]["ref_crop"] == [120, 140, 360, 360]
+    # The factor is recorded in the plan, so the passes and the preview read the rectangle
+    # back out of the job rather than re-guessing it.
+    assert tight["inputs"]["crop_factor"] == 1.5
+    assert default["inputs"]["crop_factor"] == ps.DEFAULT_CROP_FACTOR
+
+
+def test_a_plan_without_the_new_argument_is_todays_plan_byte_for_byte():
+    """The default is the tracker's shipped default, so nothing that exists today moves."""
+    assert json.dumps(_plan(), sort_keys=True, default=str) == json.dumps(
+        _plan(crop_factor=ps.DEFAULT_CROP_FACTOR), sort_keys=True, default=str)
+    assert _plan()["subjects"][0]["ref_crop"] == [0, 20, 600, 600]
+
+
+def test_a_crop_factor_that_cannot_crop_anything_is_refused():
+    """A factor below 1 is smaller than the face, which is not a crop the tracker could make."""
+    with pytest.raises(ValueError) as exc:
+        _plan(crop_factor=0.0)
+    assert "crop_factor" in str(exc.value)
+
+
+# --- geometry the plan module owns --------------------------------------------------
+#
+# `overlapping_subject_pairs` and the subject-select node used to measure the same overlap and
+# count the same faces in two places. These pin the one measure now that it has one home: the
+# score between two face boxes, and the number a face carries on a frame.
+
+def test_a_face_overlaps_the_box_that_covers_it():
+    """The overlap score is how this module says "that detection is this face": fully on itself,
+    a quarter on a box inside it, nothing on a box that merely touches."""
+    face = [100, 100, 200, 220]
+    assert ps.box_iou(face, face) == 1.0
+    assert ps.box_iou(face, [100, 100, 150, 160]) == pytest.approx(0.25)
+    assert ps.box_iou(face, [200, 220, 300, 320]) == 0.0
+
+
+def test_faces_on_a_frame_are_numbered_the_way_the_picker_numbers_them():
+    """A subject's face NUMBER is the box counted left to right on that frame, whatever order the
+    detector returned them in - and a centre-x tie is settled on the box corner, which is the
+    released tracker's rule and deliberately not the rule that orders the plan's subjects."""
+    boxes = [[400, 120, 520, 260], [100, 100, 200, 220], [250, 150, 350, 300]]
+    assert ps.left_to_right_face_order(boxes) == [1, 2, 0]
+
+    tied = [[-40, 100, 60, 220], [0, 100, 20, 108]]      # both centred at x = 10
+    assert ps.left_to_right_face_order(tied) == [0, 1]
 

@@ -192,12 +192,23 @@ function render(d, data, node) {
 
     const inputs = data.inputs || {};
     const box = el("div", "h3pp-inputs");
-    box.innerHTML = "<b>pairing as planned</b> - match frame <b>" + inputs.match_frame
-        + "</b> - source <b>" + (inputs.subject_source || "?") + "</b> - tolerance <b>"
-        + Number(inputs.match_tolerance).toFixed(3) + "</b> of the clip diagonal ("
-        + Math.round(data.tolerance_px) + "px) - unmatched_faces <b>"
-        + inputs.unmatched_faces + "</b> - max_subjects <b>"
-        + (Number(inputs.max_subjects) > 0 ? inputs.max_subjects : "off") + "</b>";
+    // Every value here came out of plan.json, so none of it is ever spliced into markup: the
+    // words around each widget setting are text nodes and each setting goes into its own <b>
+    // by textContent, the way every other line in this panel is built.
+    const setting = (value) => box.appendChild(el("b", "", value));
+    setting("pairing as planned");
+    box.appendChild(document.createTextNode(" - match frame "));
+    setting(inputs.match_frame);
+    box.appendChild(document.createTextNode(" - source "));
+    setting(inputs.subject_source || "?");
+    box.appendChild(document.createTextNode(" - tolerance "));
+    setting(Number(inputs.match_tolerance).toFixed(3));
+    box.appendChild(document.createTextNode(" of the clip diagonal ("));
+    box.appendChild(document.createTextNode(Math.round(data.tolerance_px) + "px"));
+    box.appendChild(document.createTextNode(") - unmatched_faces "));
+    setting(inputs.unmatched_faces);
+    box.appendChild(document.createTextNode(" - max_subjects "));
+    setting(Number(inputs.max_subjects) > 0 ? inputs.max_subjects : "off");
     d.body.appendChild(box);
 
     if (data.preview_url) {
@@ -234,7 +245,9 @@ function render(d, data, node) {
         d.body.appendChild(el("h4", "h3pp-sect",
             "excluded - switched off, so they keep their original pixels"));
         d.body.appendChild(chips(data.excluded_faces, "off",
-            (i) => "clip face " + i + " (the excluded_faces widget)"));
+            (i) => (typeof i === "string" && i[0] === "s"
+                ? "reference still face " + i.slice(1)
+                : "clip face " + i) + " (the excluded_faces widget)"));
     }
     if ((data.left_out || []).length) {
         d.body.appendChild(el("h4", "h3pp-sect",
@@ -242,7 +255,7 @@ function render(d, data, node) {
         d.body.appendChild(chips(data.left_out, "warn", (f) => f.pairing));
     }
     if ((data.capped_out || []).length) {
-        d.body.appendChild(el("h4", "h3pp-sect", "dropped by max_subjects"));
+        d.body.appendChild(el("h4", "h3pp-sect", "capped by max_subjects"));
         d.body.appendChild(chips(data.capped_out, "warn", (f) => f.pairing));
     }
 

@@ -26,15 +26,21 @@ import numpy as np
 #
 #   1  the plan as first written
 #   2  #10: max_subjects truncates the subject set, so a plan gained `capped_out`
+#   3  #11 review: a plan records the `crop_factor` its subject references were cut with
+#      (the tracker takes it from a widget, so it was never the plan's to assume), and
+#      `excluded_faces` can name a face on either plate - a bare number for the target clip,
+#      `s2` for the reference still
 #
-# Version 1 stays READABLE rather than migrated or refused for being old. It already recorded
-# `max_subjects` in `inputs` even though nothing acted on it, so the honest rule is the cheap
+# Version 1 and 2 stay READABLE rather than migrated or refused for being old. They already recorded
+# `max_subjects` in `inputs` even though nothing acted on it at first, so the honest rule is the cheap
 # one: read an old plan as it stands, say which version the folder was written with, and let the
 # pairing fingerprint decide - it compares max_subjects now, so an old folder that genuinely
 # disagrees about the cap is refused naming the difference, and one that agrees is the same job.
+# A version 1/2 folder records no crop_factor because it hard-coded the tracker's shipped default,
+# so `pairing_fingerprint` reads that default back out of it rather than calling it a difference.
 # Anything outside PLAN_READABLE_VERSIONS is refused by number rather than half-read.
-PLAN_VERSION = 2
-PLAN_READABLE_VERSIONS = (1, PLAN_VERSION)
+PLAN_VERSION = 3
+PLAN_READABLE_VERSIONS = (1, 2, PLAN_VERSION)
 PLAN_FILENAME = "plan.json"
 
 # The pairing preview image, written by the plan node into the job folder (#9). It is the same
@@ -68,6 +74,12 @@ REF_KINDS = (REF_CROP, REF_STILL, REF_NONE)
 # framing. Rounding of one true aspect (1080 against 1088) sits well inside this;
 # 16:9 against 4:3 does not.
 ASPECT_TOLERANCE = 0.01
+
+# How an exclusion names a face on the REFERENCE STILL instead of the target clip: ``s2``. A bare
+# number has always been a clip face, and `union` seeding makes a subject of a face only the photo
+# ever saw - so without a second numbering (spec story 6's bystander) that subject could never be
+# switched off.
+STILL_FACE_PREFIX = "s"
 
 # The tracker's defaults, mirrored so the plan can record the rectangle the tracker
 # WOULD use before any pass has run. `crop_factor` and `canvas_mode="manual"` 768x768
@@ -133,6 +145,46 @@ def _overlap_area(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     right = np.minimum(a[:, None, 2], b[None, :, 2])
     bottom = np.minimum(a[:, None, 3], b[None, :, 3])
     return np.clip(right - left, 0.0, None) * np.clip(bottom - top, 0.0, None)
+
+
+def box_iou(a, b) -> float:
+    """Intersection over union of two ``[x1, y1, x2, y2]`` boxes, as one number.
+
+    The pairwise table above pairs a whole plate at once; this is the single-pair question - is
+    the box the plan measured the same face as this box some later detection returned - and that
+    needs a score to rank candidates by. Zero area on either side, or no overlap at all, scores
+    ``0.0`` instead of raising: a box with no area overlaps nothing.
+    """
+    ax1, ay1, ax2, ay2 = (float(v) for v in a)
+    bx1, by1, bx2, by2 = (float(v) for v in b)
+    inter = (max(0.0, min(ax2, bx2) - max(ax1, bx1))
+             * max(0.0, min(ay2, by2) - max(ay1, by1)))
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def left_to_right_face_order(boxes) -> list[int]:
+    """Face indices counted left to right, as the pairing preview and Pick faces number them.
+
+    Mirrors the released tracker's own ``left_most`` ranking (nodes.py:866): centre x first, ties
+    settled on the box corner, so two faces at the same height never swap numbers. The tracker
+    scores ``left_most`` as ``-centre_x`` and sorts on the negated score, which lands on ascending
+    centre x - the same order, spelled out here rather than doubled-negated.
+
+    This is deliberately NOT the seed ordering ``build_subject_plan`` uses, and merging the two
+    would be a behaviour change, not a tidy-up: that one orders subject SEEDS - which plate a head
+    came from counts, so it breaks a centre-x tie on centre y and then on kind and index - while
+    this one orders the boxes found on ONE frame and answers the face NUMBER that a shot lock and
+    a narrowed pick ask for. Two questions, two orders, both left-to-right.
+    """
+    return sorted(
+        range(len(boxes)),
+        key=lambda k: ((float(boxes[k][0]) + float(boxes[k][2])) / 2.0,
+                       float(boxes[k][0]), float(boxes[k][1])))
 
 
 # ----------------------------------------------------------------------------
@@ -308,7 +360,23 @@ def _checked_threshold(threshold) -> float:
     return value
 
 
-def subject_crop_rect(plan, subject, crop_factor: float = DEFAULT_CROP_FACTOR):
+def plan_crop_factor(plan) -> float:
+    """The crop factor this plan's subject references were cut at.
+
+    A job folder written before the plan recorded one (plan versions 1 and 2) cut every reference
+    at the tracker's shipped default, so that is how it is read back: an old folder is not
+    suddenly a different job because the field is missing.
+    """
+    recorded = ((plan or {}).get("inputs") or {}).get("crop_factor")
+    if recorded is None:
+        return DEFAULT_CROP_FACTOR
+    try:
+        return _checked_crop_factor(recorded)
+    except ValueError:
+        return DEFAULT_CROP_FACTOR
+
+
+def subject_crop_rect(plan, subject, crop_factor: float = None):
     """The rectangle one subject's crop covers, in TARGET-CLIP pixels at the match frame.
 
     It is `tracker_rect` - the same arithmetic the plan cut the subject reference with - so the
@@ -317,8 +385,14 @@ def subject_crop_rect(plan, subject, crop_factor: float = DEFAULT_CROP_FACTOR):
     coordinates, which is how it was framed in the first place. ``None`` when the plan recorded
     no face for that subject on either plate.
 
+    ``crop_factor`` defaults to the factor the PLAN was built at rather than to the shipped 2.5:
+    the tracker takes it from a widget, so a job run at another factor would otherwise have its
+    crop regions, its overlap warnings and its preview measured at a size no pass ever used.
+
     Returns ``[x, y, w, h]`` floats in clip pixels.
     """
+    if crop_factor is None:
+        crop_factor = plan_crop_factor(plan)
     box = (subject or {}).get("clip_box")
     if box is not None:
         return tracker_rect(box, _size(_plan_size(plan, "target_size"), "target clip"),
@@ -335,12 +409,14 @@ def subject_crop_rect(plan, subject, crop_factor: float = DEFAULT_CROP_FACTOR):
 
 
 def overlapping_subject_pairs(plan, threshold: float = DEFAULT_OVERLAP_THRESHOLD,
-                              crop_factor: float = DEFAULT_CROP_FACTOR) -> list[dict]:
+                              crop_factor: float = None) -> list[dict]:
     """Every pair of subjects whose crop regions overlap by more than ``threshold``.
 
     The measure is intersection over union of the two crop rectangles at the match frame, so 0
     means the crops merely touch and 1 means they are the same region. Exactly on the threshold
     is NOT a warning: a plan planned at a round number would otherwise warn about itself.
+    ``crop_factor`` defaults to the factor the plan was built at, so the warning is about the
+    crops the passes will actually cut.
 
     Pairs come back in plan order, the lower-numbered subject first, which is also the left to
     right order the plan was settled in. Nothing here raises for a plan with two subjects on top
@@ -367,13 +443,9 @@ def overlapping_subject_pairs(plan, threshold: float = DEFAULT_OVERLAP_THRESHOLD
             index_b, rect_b = rects[j]
             if rect_a is None or rect_b is None:
                 continue
-            box_a = np.array([[rect_a[0], rect_a[1], rect_a[0] + rect_a[2], rect_a[1] + rect_a[3]]])
-            box_b = np.array([[rect_b[0], rect_b[1], rect_b[0] + rect_b[2], rect_b[1] + rect_b[3]]])
-            shared = float(_overlap_area(box_a, box_b)[0][0])
-            union = (rect_a[2] * rect_a[3]) + (rect_b[2] * rect_b[3]) - shared
-            if union <= 0.0:
-                continue
-            overlap = shared / union
+            box_a = (rect_a[0], rect_a[1], rect_a[0] + rect_a[2], rect_a[1] + rect_a[3])
+            box_b = (rect_b[0], rect_b[1], rect_b[0] + rect_b[2], rect_b[1] + rect_b[3])
+            overlap = box_iou(box_a, box_b)
             if overlap > limit:
                 pairs.append({"a": index_a, "b": index_b, "overlap": float(overlap),
                               "rect_a": [float(v) for v in rect_a],
@@ -387,12 +459,24 @@ def overlapping_subject_pairs(plan, threshold: float = DEFAULT_OVERLAP_THRESHOLD
 # the excluded_faces widget
 # ----------------------------------------------------------------------------
 
-def parse_excluded_faces(value) -> list[int]:
-    """Read the excluded_faces widget: ``"2, 5"`` -> ``[2, 5]``, empty -> ``[]``.
+def _digits(text: str) -> bool:
+    """``"12"`` / ``"-3"`` -> True, ``""`` / ``"s2"`` / ``" bystander"`` -> False."""
+    body = text[1:] if text.startswith("-") else text
+    return bool(body) and all(char.isdigit() for char in body)
+
+
+def parse_excluded_faces(value) -> list:
+    """Read the excluded_faces widget: ``"2, s5"`` -> ``[2, "s5"]``, empty -> ``[]``.
 
     A typed widget rather than a front end: the numbers are the ones printed on the pairing
     preview, so switching a face off is a text edit, and text edits travel with the saved
     workflow.
+
+    A bare number names a face on the **target clip** - the numbering it has always had. An
+    ``s``-prefixed one names a face on the **reference still**, which is the only way to switch
+    off a bystander the photo saw and the clip never did: with the shipped ``union`` seeding such
+    a face becomes a subject, and a subject with no clip face has no clip number to switch it
+    off with.
     """
     if value is None:
         return []
@@ -400,7 +484,7 @@ def parse_excluded_faces(value) -> list[int]:
         chunks: list = list(value)
     else:
         chunks = str(value).replace(";", ",").replace("/", ",").split(",")
-    out: list[int] = []
+    out: list = []
     for chunk in chunks:
         if isinstance(chunk, (int, float)) and not isinstance(chunk, bool):
             out.append(int(chunk))
@@ -408,29 +492,78 @@ def parse_excluded_faces(value) -> list[int]:
         text = str(chunk).strip()
         if not text:
             continue
+        if text[0] in ("s", "S"):
+            tail = text[1:]
+            if _digits(tail):
+                out.append(STILL_FACE_PREFIX + tail)
+                continue
         try:
             out.append(int(text))
         except ValueError:
             raise ValueError(
                 f"excluded_faces has to be comma-separated face numbers, like '0, 3' - "
-                f"{text!r} is not one. The numbers are the ones printed on the pairing "
-                f"preview."
+                f"{text!r} is not one. A bare number is a target clip face; a reference still "
+                f"face is written with an s, like 's2'. The numbers are the ones printed on "
+                f"the pairing preview."
             ) from None
     return out
 
 
-def _checked_excluded(parsed, n_target: int, match_frame: int) -> list[int]:
-    """Exclusions sorted, deduplicated, and checked against the faces actually found."""
-    unique = sorted({int(i) for i in parsed})
-    for i in unique:
+def exclusion_plates(excluded) -> tuple[list[int], list[int]]:
+    """An exclusion list split into ``(target clip faces, reference still faces)``.
+
+    Downstream - the preview, the report, the chips - each plate has to be counted and named
+    separately, and none of them should have to re-read the ``s`` prefix for itself.
+    """
+    clip: list[int] = []
+    still: list[int] = []
+    for item in excluded or []:
+        if isinstance(item, str):
+            still.append(int(item[1:]))
+        else:
+            clip.append(int(item))
+    return clip, still
+
+
+def _checked_excluded(parsed, n_target: int, n_still: int,
+                      match_frame: int) -> list:
+    """Exclusions sorted, deduplicated, and checked against the faces actually found.
+
+    Each one is checked against the plate it names, so an out-of-range ``s2`` says the reference
+    still only had two faces rather than blaming a clip it was never pointing at.
+    """
+    clip, still = exclusion_plates(parsed)
+    clip, still = sorted(set(clip)), sorted(set(still))
+    for i in clip:
         if i < 0 or i >= n_target:
             raise ValueError(
-                f"excluded_faces names face {i} on the target clip, but only {n_target} "
-                f"face(s) were found there on frame {match_frame}. The numbers come from "
-                f"the pairing preview, so re-read them after changing detector, "
-                f"confidence or match_frame."
+                f"excluded_faces names target clip face {i}, but only {n_target} face(s) "
+                f"were found on the target clip on frame {match_frame}. A reference still "
+                f"face is written s{i}. The numbers come from the pairing preview, so "
+                f"re-read them after changing detector, confidence or match_frame."
             )
-    return unique
+    for j in still:
+        if j < 0 or j >= n_still:
+            raise ValueError(
+                f"excluded_faces names reference still face {j}, but only {n_still} face(s) "
+                f"were found on the reference still on frame {match_frame}, so the reference "
+                f"still faces run 0-{max(0, n_still - 1)}. A target clip face is written {j} "
+                f"without the s. The numbers come from the pairing preview, so re-read them "
+                f"after changing detector, confidence or match_frame."
+            )
+    return clip + [STILL_FACE_PREFIX + str(j) for j in still]
+
+
+def describe_exclusions(excluded) -> str:
+    """The exclusions as one readable run-on: ``clip face(s) 1, reference still face(s) s2``."""
+    clip, still = exclusion_plates(excluded)
+    named = []
+    if clip:
+        named.append("clip face(s) " + ", ".join(str(i) for i in clip))
+    if still:
+        named.append("reference still face(s) "
+                     + ", ".join(STILL_FACE_PREFIX + str(j) for j in still))
+    return ", ".join(named)
 
 
 def _confs(values, n: int) -> list[float]:
@@ -446,11 +579,31 @@ def _confs(values, n: int) -> list[float]:
 # the subject plan
 # ----------------------------------------------------------------------------
 
+def _checked_crop_factor(value) -> float:
+    """The tracker's ``crop_factor`` as a usable number.
+
+    It is the crop side as a multiple of the detected face HEIGHT, so below 1.0 there is no crop
+    the tracker could make - the face would not fit in it. The plan records it because the
+    **subject reference** has to be framed at the same factor the tracker crops at, and the
+    tracker takes that from a widget: it was never this module's to assume.
+    """
+    try:
+        factor = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"crop_factor must be a number, got {value!r}") from None
+    if not factor >= 1.0:
+        raise ValueError(
+            f"crop_factor {value!r} cannot frame a face: it is the crop side as a multiple of "
+            f"face HEIGHT, so it has to be at least 1.0 (H3 Face Track + Crop ships 2.5).")
+    return factor
+
+
 def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
                        target_size, still_size, match_frame: int = 0,
                        subject_source: str = "union", tolerance: float = 0.05,
                        excluded=(), max_subjects: int = 0,
-                       unmatched_faces: str = DEFAULT_UNMATCHED_FACES) -> dict:
+                       unmatched_faces: str = DEFAULT_UNMATCHED_FACES,
+                       crop_factor: float = DEFAULT_CROP_FACTOR) -> dict:
     """Settle who the subjects of this job are, as a plain JSON-serialisable dict.
 
     Both plates were detected on the match frame, so pairing is the positional kind
@@ -462,7 +615,9 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
 
     Every subject records whether it has a **subject reference** and, when it does, the
     rectangle it gets cut with and its `ref_kind` (`crop`, `still` or `none`). `excluded` names
-    faces on the target clip to switch off; their partner on the other plate goes with them.
+    faces to switch off - a bare number on the target clip, `s2` on the reference still - and the
+    face paired to each one goes with it, so the person it was matched to falls to whatever
+    `unmatched_faces` says.
     `max_subjects` (0 = no cap) is recorded for later passes to act on, not applied here.
 
     `unmatched_faces` decides what becomes of a face that found no partner on the other plate:
@@ -474,6 +629,11 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     * ``with_still`` - it becomes a subject whose subject reference is the whole reference still.
 
     A face that found a partner is identical in all three modes.
+
+    `crop_factor` is **H3 Face Track + Crop's own crop factor**, which that node takes from a
+    widget. Every **subject reference** is cut with the rectangle that factor gives at the match
+    frame, so a plan built at a factor the tracker will not use mis-frames every reference in the
+    job - the detail it carries lands somewhere else in the crop.
     """
     tw, th, sw, sh, _scale = _plates(target_size, still_size)
     if subject_source not in SUBJECT_SOURCES:
@@ -492,13 +652,16 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     frame = int(match_frame)
     if frame < 0:
         raise ValueError(f"match_frame cannot be negative, got {frame}")
+    factor = _checked_crop_factor(crop_factor)
 
     clip = _face_array(target_boxes, "target clip faces")
     still = _face_array(still_boxes, "reference still faces")
     clip_confs = _confs(target_confs, len(clip))
     still_confs = _confs(still_confs, len(still))
-    excluded_faces = _checked_excluded(parse_excluded_faces(excluded), len(clip), frame)
-    off = set(excluded_faces)
+    excluded_faces = _checked_excluded(parse_excluded_faces(excluded), len(clip),
+                                       len(still), frame)
+    off_clip, off_still = exclusion_plates(excluded_faces)
+    off_clip, off_still = set(off_clip), set(off_still)
 
     pairing = pair_faces(clip, still, (tw, th), (sw, sh), tolerance)
     scale = pairing["scale"]
@@ -508,15 +671,17 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
 
     if subject_source == "target_clip":
         seeds: list[tuple[str, int]] = [("clip", i) for i in range(len(clip))
-                                        if i not in off]
+                                        if i not in off_clip]
     elif subject_source == "reference_still":
         seeds = [("still", j) for j in range(len(still))
-                 if target_of.get(j) is None or target_of[j] not in off]
+                 if j not in off_still
+                 and (target_of.get(j) is None or target_of[j] not in off_clip)]
     else:
         # A still face that found a partner is already represented by that partner, so
         # union adds only the faces the clip never saw.
-        seeds = ([("clip", i) for i in range(len(clip)) if i not in off]
-                 + [("still", j) for j in pairing["unpaired_still"]])
+        seeds = ([("clip", i) for i in range(len(clip)) if i not in off_clip]
+                 + [("still", j) for j in pairing["unpaired_still"]
+                    if j not in off_still])
 
     def left_to_right(seed: tuple[str, int]) -> tuple:
         kind, i = seed
@@ -532,6 +697,13 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     for index, (kind, i) in enumerate(sorted(seeds, key=left_to_right)):
         clip_face = i if kind == "clip" else target_of.get(i)
         still_face = still_of.get(i) if kind == "clip" else i
+        # A face switched off on either plate cannot hold up a pair: the person it was matched to
+        # loses its partner and falls to whatever `unmatched_faces` says, which is what switching
+        # one detection off has to mean.
+        if clip_face in off_clip:
+            clip_face = None
+        if still_face in off_still:
+            still_face = None
         subject = {
             "index": index,
             "clip_face": clip_face,
@@ -558,12 +730,12 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
                 # The same rectangle the tracker would crop this face with, in the still's
                 # pixels at the still's native resolution.
                 subject["ref_crop"] = crop_rect_for_reference(
-                    tracker_rect(clip[clip_face], (tw, th)), (sw, sh), (tw, th))
+                    tracker_rect(clip[clip_face], (tw, th), factor), (sw, sh), (tw, th))
             else:
                 # The clip never saw this person, so the framing comes from the still's own
                 # face at the same crop_factor.
                 subject["ref_crop"] = crop_rect_for_reference(
-                    tracker_rect(still[still_face], (sw, sh)), (sw, sh), (sw, sh))
+                    tracker_rect(still[still_face], (sw, sh), factor), (sw, sh), (sw, sh))
         elif unmatched_faces == "with_still":
             # Nothing to cut: this face was never resolved in the still, so there is no
             # rectangle to map into it. `crop_rect_for_reference` is for CUT references and is
@@ -594,8 +766,8 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
         subject["index"] = index
 
     # The cap (#10) spends the generations on purpose. The first N faces in the order the job
-    # runs them are the job; the tail is dropped, and dropped LAST because `leave` (#8) already
-    # took the unpaired faces out first - nobody is named twice. A dropped face follows #8's rule
+    # runs them are the job; the tail is capped, and capped LAST because `leave` (#8) already
+    # took the unpaired faces out first - nobody is named twice. A capped face follows #8's rule
     # for a left-out face: `index: None`, so it can never be numbered, selected, reach `next`, or
     # be indexed into a pass folder. It keeps where it stood on the match frame so the report can
     # name each one instead of cutting the tail quietly.
@@ -629,6 +801,10 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
             "excluded_faces": excluded_faces,
             "unmatched_faces": str(unmatched_faces),
             "max_subjects": int(max_subjects or 0),
+            # The tracker's own crop factor, recorded because it is the rectangle every
+            # subject reference in this job was cut with - and the passes read that
+            # rectangle back from the plan rather than re-guessing it.
+            "crop_factor": float(factor),
         },
         # What the match frame measured, kept so a later pass can rebuild one subject's
         # pick payload without re-detecting anything or loading the still again.
@@ -647,7 +823,7 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
         # Faces `unmatched_faces=leave` took out of the subject set. Not subjects, so no pass
         # ever runs for them - which is why they keep their original pixels.
         "left_out": left_out,
-        # Faces `max_subjects` dropped so the generations get spent elsewhere (#10). They found a
+        # Faces `max_subjects` caps so the generations get spent elsewhere (#10). They found a
         # partner and would have been subjects; the cap said otherwise. This is where that
         # decision stays readable afterwards, and why the report can still name them.
         "capped_out": capped_out,
@@ -794,7 +970,7 @@ def _json_default(value):
 
 
 def _capped_label(subject, frame) -> str:
-    """How a face the cap dropped is named in the report.
+    """How a capped face is named in the report.
 
     The numbers are the ones a user reads off the pairing preview, so a clip face is named in the
     clip's own pixels and a face only the still ever saw is named where it would have stood.
@@ -815,20 +991,20 @@ def _capped_label(subject, frame) -> str:
 
 
 def capped_lines(plan) -> list:
-    """The truncation sentence, naming every face the cap dropped.
+    """The truncation sentence, naming every capped face.
 
     A tail cut in silence reads like the pairing went wrong, so this never returns a bare count:
-    each dropped face is named with the position a user can find it at, and the sentence says what
-    to do about it. Empty when nobody was dropped.
+    each capped face is named with the position a user can find it at, and the sentence says what
+    to do about it. Empty when nothing was capped.
     """
     inputs = (plan or {}).get("inputs") or {}
     cap = int(inputs.get("max_subjects") or 0)
-    dropped = (plan or {}).get("capped_out") or []
-    if not cap or not dropped:
+    capped = (plan or {}).get("capped_out") or []
+    if not cap or not capped:
         return []
     frame = (plan or {}).get("match_frame")
-    named = ", ".join(_capped_label(subject, frame) for subject in dropped)
-    return [f"subject cap {cap}: {len(dropped)} face(s) dropped - {named}. "
+    named = ", ".join(_capped_label(subject, frame) for subject in capped)
+    return [f"subject cap {cap}: {len(capped)} face(s) capped - {named}. "
             f"Raise max_subjects to include them, or switch a face off with excluded_faces to "
             f"spend those generations elsewhere on purpose."]
 
@@ -839,11 +1015,11 @@ def uncapped_cost_line(plan, frames) -> str:
     The cap's whole point is generations saved, so the number it saved has to sit beside the
     number it spends. Empty when the cap changed nothing.
     """
-    dropped = len((plan or {}).get("capped_out") or [])
-    if not dropped:
+    capped = len((plan or {}).get("capped_out") or [])
+    if not capped:
         return ""
     running = int((plan or {}).get("subject_count") or 0)
-    total = running + dropped
+    total = running + capped
     return (f"{running} subject(s) of {total} to generate; uncapped cost would be "
             f"{total} subject(s) x {int(frames)} frame(s)")
 
@@ -861,6 +1037,49 @@ def plan_version_note(plan) -> str:
                 f"writes version {PLAN_VERSION}. The plan is read as it stands - the pairing "
                 f"fingerprint, not the version number, is what refuses a different job.")
     return ""
+
+
+def chain_lines(check) -> list:
+    """The composite's chain sentence, in the voice of what was actually recorded.
+
+    Never a flat statement that the passes WERE chained: it names which passes declared their
+    base, and where nothing was declared it says the claim is unproven rather than hiding it.
+    """
+    check = check or {}
+    declared = check.get("declared") or {}
+    missing = check.get("missing") or []
+    lines = ["chain as declared by H3 Pass Save: "
+             + "; ".join(f"subject {index} onto {chain_label(value)}"
+                         for index, value in sorted(declared.items()))]
+    if missing:
+        named = ", ".join(f"subject {index}" for index in missing)
+        lines.append(
+            f"{named} recorded no chained_from, so nothing in this job folder says what those "
+            f"passes were composited onto: the last stitched pass being the finished clip is "
+            f"unproven for them. Re-save those stages with chained_from set, or check the "
+            f"stitched folders yourself.")
+    else:
+        lines.append("every pass named the plate it was composited onto, so the last subject's "
+                     "stitched frames carry the earlier passes into the finished clip because "
+                     "each pass took the previous one's result as its base - nothing is "
+                     "re-blended here.")
+    return lines
+
+
+def chain_error(check) -> str:
+    """The refusal sentence for a declared base that contradicts the plan order."""
+    parts = []
+    for index, declared_value, expected in (check or {}).get("wrong") or []:
+        parts.append(
+            f"subject {index} declared chained_from {declared_value} (it composited onto "
+            f"{chain_label(declared_value)}), but this plan composites it onto "
+            f"{chain_label(expected)}. Wiring a pass onto the target clip instead of the previous "
+            f"pass's result drops every earlier subject from the finished clip: their refined "
+            f"faces revert to the pixels the clip arrived with, and the report would still name "
+            f"them. Set chained_from on H3 Pass Save to the subject whose stitched result that "
+            f"pass was composited onto - {expected} for this one - and re-save its stitched "
+            f"stage.")
+    return " ".join(parts)
 
 
 def write_plan(job_dir, plan: dict) -> str:
@@ -1064,10 +1283,6 @@ def positions_path(job_dir, subject) -> str:
     return os.path.join(pass_dir(job_dir, subject), POSITIONS_FILENAME)
 
 
-def empty_manifest() -> dict:
-    return {"version": MANIFEST_VERSION, "passes": {}}
-
-
 def _manifest_passes(manifest: dict, job_dir) -> dict:
     passes = manifest.get("passes")
     if passes is None:
@@ -1166,6 +1381,80 @@ def pass_is_complete(job_dir, subject) -> bool:
 def plan_subject_indices(plan) -> list[int]:
     """The subject numbers this plan actually has."""
     return [int(subject["index"]) for subject in (plan or {}).get("subjects") or []]
+
+
+# What H3 Pass Save's `chained_from` widget means: -1 is the target clip, any other number is the
+# subject whose stitched result that pass was composited onto.
+CHAINED_TO_CLIP = -1
+
+
+def chain_check(plan, job_dir) -> dict:
+    """What each pass DECLARED it composited onto, against the plan's own composite order.
+
+    **H3 Multi-Face Composite** hands back the last subject's stitched frames on the claim that
+    every earlier pass is already carried inside them, because each pass took the previous pass's
+    result as its base. Nothing in the graph proves that - the wiring is the user's - so H3 Pass
+    Save records what each pass said it composited onto, and the composite checks that against the
+    plan order it prints. A pass that says the target clip when the plan says "after subject 0"
+    silently reverts subject 0 in the finished clip while the report claims a chain, so that is a
+    refusal and not a note.
+
+    Returns ``{"declared": {subject: value}, "missing": [subject, ...],
+    "wrong": [(subject, declared, expected), ...]}``.
+
+    A missing declaration only counts against a subject that is not first in the order: the first
+    pass sits on the target clip by definition - which is also what the widget's default says - so
+    a job folder written before the field existed is silent exactly where silence is harmless.
+    """
+    order = plan_subject_indices(plan)
+    declared, missing, wrong = {}, [], []
+    for position, index in enumerate(order):
+        record = manifest_stage_record(job_dir, index, "stitched")
+        value = (record or {}).get("chained_from") if isinstance(record, dict) else None
+        expected = CHAINED_TO_CLIP if position == 0 else order[position - 1]
+        if value is None:
+            if position:
+                missing.append(index)
+            continue
+        declared[index] = int(value)
+        if int(value) != int(expected):
+            wrong.append((index, int(value), int(expected)))
+    return {"declared": declared, "missing": missing, "wrong": wrong}
+
+
+def checked_chained_from(plan, subject, value) -> int:
+    """A ``chained_from`` declaration that means something for THIS plan.
+
+    -1 (the target clip) or one of the plan's own subjects, and never the subject itself: a pass
+    composited onto its own earlier output is not a chain, it is a loop nobody meant.
+    """
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"chained_from must be -1 (the target clip) or a subject number, got {value!r}"
+        ) from None
+    if index == CHAINED_TO_CLIP:
+        return CHAINED_TO_CLIP
+    if index < CHAINED_TO_CLIP:
+        raise ValueError(
+            f"chained_from {index} means nothing: -1 is the target clip and every other value is "
+            f"a subject number.")
+    if index == _subject_index(subject):
+        raise ValueError(
+            f"chained_from {index} is subject {index} itself. A pass cannot composite onto its "
+            f"own output: name the subject whose stitched result it was composited onto, or -1 "
+            f"for the target clip.")
+    if index not in plan_subject_indices(plan):
+        raise ValueError(
+            f"chained_from {index} is not a subject of this plan. The subjects are "
+            f"{', '.join(str(i) for i in plan_subject_indices(plan))}, or -1 for the target clip.")
+    return index
+
+
+def chain_label(value) -> str:
+    """A chained_from value in words: which plate that pass was composited onto."""
+    return "the target clip" if int(value) == CHAINED_TO_CLIP else f"subject {int(value)}"
 
 
 def check_manifest_subjects(plan, job_dir) -> list[int]:
@@ -1279,16 +1568,30 @@ def read_positions(job_dir, subject) -> dict:
 # old ones, then stitches two different ideas of who is who into one clip. So the inputs that
 # decide the pairing get a fingerprint, and every pass checks it.
 #
-# `max_subjects` is deliberately NOT part of it: it is recorded and not applied (#10), so
-# changing it changes nothing on disk. What it would change is the subject set below, which is
-# compared whatever the widgets say.
+# `max_subjects` USED to be left out because it was recorded and not applied; #10 made it
+# truncate the subject set, so two caps are two jobs and it is in the list below.
 
 PAIRING_INPUT_FIELDS = ("target_size", "still_size", "match_frame", "subject_source",
                         "match_tolerance", "excluded_faces", "unmatched_faces",
                         # #10: the cap used to be inert, so it stayed out of the fingerprint. It
                         # truncates the subject set now, so two caps are two jobs - and the
                         # fingerprint, not the plan version number, is what says so.
-                        "max_subjects")
+                        "max_subjects",
+                        # #11 review: the crop factor decides the rectangle every subject
+                        # reference in the folder was cut with, so a plan at another factor is a
+                        # different job even when the pairing itself is identical.
+                        "crop_factor")
+
+# What the match frame actually MEASURED (#11 review). The subject indices say who was paired;
+# these say which detections that pairing came from. A different still of the same size, or a
+# different detector, can pair different faces into the SAME indices - and a resume on those
+# composites passes cut from two different pairings into one clip.
+PAIRING_EVIDENCE_FIELDS = ("target_boxes", "still_boxes", "scale")
+
+# How the plates were detected, from the plan's own `run` record: same boxes by different
+# settings is a coincidence worth refusing on, because the settings decide what else would have
+# been found at that frame.
+PAIRING_RUN_FIELDS = ("detector", "confidence")
 
 
 def _normalise(value):
@@ -1312,11 +1615,16 @@ def pairing_fingerprint(plan) -> dict:
     """The part of a plan that says WHICH pairing this job was planned on.
 
     Both plate sizes, the match frame, the seeding plate, the tolerance, the exclusions, what was
-    decided about faces that found no partner, and the subject set itself - index, clip face and
-    still face for every subject. The subject set is in here because it is what actually breaks:
-    a re-detect that pairs someone else at the same widgets is still a different job.
-    `unmatched_faces` is in here for the same reason (#8): it does not re-run the pairing, it
-    decides which of the paired faces become subjects at all.
+    decided about faces that found no partner, the crop factor the references were cut at, and the
+    subject set itself - index, clip face and still face for every subject. The subject set is in
+    here because it is what actually breaks: a re-detect that pairs someone else at the same
+    widgets is still a different job. `unmatched_faces` is in here for the same reason (#8): it
+    does not re-run the pairing, it decides which of the paired faces become subjects at all.
+
+    #11 review added the rest of the evidence: the boxes both plates measured at the match frame,
+    their scale, and the detector and confidence that produced them. The subject set is the
+    OUTCOME of a pairing; these are the measurements it came from, and two different pairings can
+    land on the same outcome.
     """
     inputs = (plan or {}).get("inputs") or {}
     record = {}
@@ -1324,7 +1632,16 @@ def pairing_fingerprint(plan) -> dict:
         value = inputs.get(field)
         if value is None:
             value = (plan or {}).get(field)
+        if field == "crop_factor":
+            # A folder written before the plan recorded a factor cut its references at the
+            # shipped default, so a missing field is that default and not a difference.
+            value = plan_crop_factor(plan)
         record[field] = _normalise(value)
+    for field in PAIRING_EVIDENCE_FIELDS:
+        record[field] = _normalise((plan or {}).get(field))
+    run = (plan or {}).get("run") or {}
+    for field in PAIRING_RUN_FIELDS:
+        record[field] = _normalise(run.get(field))
     record["subjects"] = [[_normalise((subject or {}).get("index")),
                            _normalise((subject or {}).get("clip_face")),
                            _normalise((subject or {}).get("still_face"))]
@@ -1334,6 +1651,31 @@ def pairing_fingerprint(plan) -> dict:
 
 def _describe(value) -> str:
     return json.dumps(value, sort_keys=True)
+
+
+def _boxes_differ(a, b) -> bool:
+    return [round(float(v), 3) for v in a] != [round(float(v), 3) for v in b]
+
+
+def _boxes_line(field: str, before, after) -> str:
+    """One box-list difference, in words a person can act on.
+
+    A face box is four numbers and a plate has several faces, so dumping every coordinate of
+    every box reads as noise. What matters is how many faces each side measured and which one
+    moved first - that is the frame to go and look at.
+    """
+    before = list(before or [])
+    after = list(after or [])
+    parts = [f"{field}: the job folder has {len(before)} face(s) at the match frame, this plan "
+             f"has {len(after)}"]
+    shared = min(len(before), len(after))
+    first = next((k for k in range(shared) if _boxes_differ(before[k], after[k])), None)
+    if first is None and len(before) != len(after):
+        parts.append(f"the extra face(s) start at index {shared}")
+    elif first is not None:
+        parts.append(f"first difference at face {first}: there {_describe(before[first])}, "
+                     f"here {_describe(after[first])}")
+    return "; ".join(parts)
 
 
 def _subjects_line(before: list, after: list) -> str:
@@ -1358,12 +1700,24 @@ def fingerprint_difference(stored_plan, current_plan) -> list[str]:
 
     Empty means the same pairing: re-planning it into the same job folder is a resume, not a
     mix, and has to be allowed or no job could ever be re-run.
+
+    The lines are written for a person reading an error at a node: `field: the job folder has X,
+    this plan has Y`, and for the box lists a count plus the first box that moved rather than
+    every coordinate of every face.
     """
     before = pairing_fingerprint(stored_plan)
     after = pairing_fingerprint(current_plan)
     lines = []
     for field in PAIRING_INPUT_FIELDS:
         if before[field] != after[field]:
+            lines.append(f"{field}: the job folder has {_describe(before[field])}, this plan "
+                         f"has {_describe(after[field])}")
+    for field in PAIRING_EVIDENCE_FIELDS + PAIRING_RUN_FIELDS:
+        if before[field] == after[field]:
+            continue
+        if field.endswith("_boxes"):
+            lines.append(_boxes_line(field, before[field], after[field]))
+        else:
             lines.append(f"{field}: the job folder has {_describe(before[field])}, this plan "
                          f"has {_describe(after[field])}")
     if before["subjects"] != after["subjects"]:

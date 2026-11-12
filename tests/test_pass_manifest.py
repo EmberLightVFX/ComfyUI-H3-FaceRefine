@@ -172,6 +172,53 @@ def test_the_fingerprint_names_every_pairing_input_that_differs(tmp_path):
                                                                       repaired))
 
 
+# --- the chain each pass DECLARES it composited onto (#11 review, P3) -----------------
+
+def test_the_chain_is_read_back_from_what_each_pass_declared(tmp_path):
+    """The composite hands back the last subject stitched frames on the claim that each pass
+    composited onto the previous pass's result. Pass Save records that claim, so the composite
+    can check it instead of asserting it."""
+    job = ps.job_dir_for(tmp_path, "group shot")
+    plan = _plan(0, 1, 2)
+    ps.write_plan(job, plan)
+    for subject, chained in ((0, -1), (1, 0), (2, 1)):
+        ps.record_pass_stage(job, subject, "stitched",
+                             {"frames": 4, "size": [8, 6], "chained_from": chained})
+
+    check = ps.chain_check(plan, job)
+    assert check["declared"] == {0: -1, 1: 0, 2: 1}
+    assert check["wrong"] == [] and check["missing"] == []
+
+
+def test_a_pass_that_declares_the_wrong_predecessor_is_named(tmp_path):
+    """Every pass wired onto the target clip instead of the previous pass: subject 0 silently
+    reverts in the finished clip while the report claims a chain. Refused, naming the subject."""
+    job = ps.job_dir_for(tmp_path, "group shot")
+    plan = _plan(0, 1, 2)
+    ps.write_plan(job, plan)
+    for subject, chained in ((0, -1), (1, -1), (2, 1)):
+        ps.record_pass_stage(job, subject, "stitched", {"chained_from": chained})
+
+    check = ps.chain_check(plan, job)
+    assert check["wrong"] == [(1, -1, 0)]
+    assert check["missing"] == []
+
+
+def test_an_older_job_that_declared_nothing_reports_the_gap(tmp_path):
+    """A job saved before chained_from existed is not refused for its age - the composite warns
+    that the chain is unproven, and names which subjects it cannot vouch for."""
+    job = ps.job_dir_for(tmp_path, "group shot")
+    plan = _plan(0, 1, 2)
+    ps.write_plan(job, plan)
+    for subject in (0, 1, 2):
+        ps.record_pass_stage(job, subject, "stitched", {"frames": 4})
+
+    check = ps.chain_check(plan, job)
+    # Subject 0 sits on the target clip by definition, so its silence costs nothing.
+    assert check["missing"] == [1, 2]
+    assert check["wrong"] == []
+
+
 def test_the_crop_positions_round_trip_with_the_tracker_s_shapes_back(tmp_path):
     """`crops.json` is readable JSON that a resumed pass can stitch from - including the
     tuples the tracker built, which JSON would otherwise turn back into lists."""

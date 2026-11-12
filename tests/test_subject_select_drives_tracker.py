@@ -291,7 +291,10 @@ def test_the_node_hands_over_the_narrowed_pick_and_its_subject_reference(tmp_pat
 
     assert index == 0 and exists == 1
     assert len(pick["picks"]) == len(SEGMENTS)
-    assert pick["subject_index"] == 0
+    # ADR 0005: the handed-over payload is the picker's key set, verbatim. Whose pass it is
+    # rides on the `subject_index` OUTPUT above, never inside the payload.
+    assert set(pick) == set(payload)
+    assert "subject_index" not in pick and "plan_match_frame" not in pick
     assert tuple(reference.shape) == (1, 64, 96, 3)
     assert abs(float(reference[0, 0, 0, 0]) - 40.0 / 255.0) < 0.01
     assert "subject 0" in report

@@ -52,7 +52,6 @@ def _narrowed(absent_flags, segments=SHOTS, frames: int = FRAMES) -> dict:
         "confidence": 0.35,
         "select": "subject_plan",
         "select_index": 0,
-        "plan_match_frame": 2,
     }
 
 
@@ -136,10 +135,12 @@ def test_planned_absence_and_a_lost_track_are_tellible_apart_in_one_pass():
 
 
 def test_the_shot_account_needs_no_new_widget_on_either_node():
-    """Nothing was added to ask the user with: the payload each node already has is enough."""
+    """Nothing was added to ask the user with: the payload each node already has is enough.
+    (`chained_from` is #11 review's widget and answers a different question - the shot account
+    still needs nothing of its own.)"""
     save = m.H3PassSave.INPUT_TYPES()
     assert list(save["required"]) == ["plan", "subject", "stage", "images"]
-    assert list(save["optional"]) == ["transform"]
+    assert list(save["optional"]) == ["transform", "chained_from"]
     select = m.H3SubjectSelect.INPUT_TYPES()
     assert list(select["required"]) == ["plan", "face_pick", "subject"]
     assert not select.get("optional")

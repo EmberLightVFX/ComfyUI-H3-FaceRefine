@@ -84,7 +84,8 @@ def _view_url(root: str, path: str) -> str:
 
 
 def _face_number(value):
-    """A face number, or None. `leave` and the cap both give a dropped face `index: None`, and
+    """A face number, or None. `leave` and the cap both give a face that is not a subject
+    an `index: None`, and
     that is exactly what the panel has to show: a face with no subject number."""
     return None if value is None else int(value)
 
@@ -158,8 +159,8 @@ def _subject_row(root, job, subject) -> dict:
     }
 
 
-def _dropped_row(face) -> dict:
-    """A face that is not a subject: left out by `unmatched_faces=leave` (#8) or dropped by
+def _not_subject_row(face) -> dict:
+    """A face that is not a subject: left out by `unmatched_faces=leave` (#8) or capped by
     `max_subjects` (#10). Never a subject number - those entries carry `index: None`, which is
     what keeps them out of every pass folder."""
     return {
@@ -223,14 +224,17 @@ def preview_state(job_name) -> dict:
     state["pairs"] = plan.get("pairs") or []
     state["unpaired_target"] = plan.get("unpaired_target") or []
     state["unpaired_still"] = plan.get("unpaired_still") or []
-    state["excluded_faces"] = [int(i) for i in (plan.get("excluded_faces") or [])]
+    # Kept as the plan wrote them: a bare number is a target clip face, an `s` prefix a reference
+    # still face. Coercing to int here would throw away which plate was named.
+    state["excluded_faces"] = [str(i) if isinstance(i, str) else int(i)
+                               for i in (plan.get("excluded_faces") or [])]
     state["subject_count"] = int(plan.get("subject_count") or len(plan.get("subjects") or []))
     state["subjects"] = [_subject_row(root, job, s) for s in (plan.get("subjects") or [])]
     # The faces the plan took out of the subject set, named rather than counted: `leave` (#8)
     # and the cap (#10) both decide who does NOT get refined, and both have to stay findable
     # afterwards. Never index these entries - they carry `index: None`.
-    state["left_out"] = [_dropped_row(s) for s in (plan.get("left_out") or [])]
-    state["capped_out"] = [_dropped_row(s) for s in (plan.get("capped_out") or [])]
+    state["left_out"] = [_not_subject_row(s) for s in (plan.get("left_out") or [])]
+    state["capped_out"] = [_not_subject_row(s) for s in (plan.get("capped_out") or [])]
     state["counts"] = plan_store.subject_kind_counts(plan)
     state["run"] = dict(plan.get("run") or {})
     # The pairing inputs, read out of the plan rather than off the widgets: this is what the job

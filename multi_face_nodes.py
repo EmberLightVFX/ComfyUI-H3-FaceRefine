@@ -52,8 +52,15 @@ MAX_SUBJECT_CHOICES = 64
 
 CATEGORY = "MiniMax H3/Face Refine"
 
-# The pack's own tracker defaults, quoted so the report can name the cost of a job before
-# any pass has picked a size. `H3FaceTrackCrop` ships crop_factor 2.5 and a 768x768 canvas.
+# The pack's own tracker defaults. `H3FaceTrackCrop` ships crop_factor 2.5 and a 768x768 canvas.
+#
+# The CANVAS is only ever quoted as an estimate in the report: it is set on the tracker, on
+# widgets this node cannot see, and it can switch to auto - so the report says which default it
+# is standing on instead of reading like a measurement of the job.
+#
+# The CROP FACTOR is different: this node cuts the subject references, so it has to be asked for
+# the factor (the `crop_factor` widget) and the plan records it. A reference cut at a factor the
+# tracker will not use is a mis-framed reference.
 DEFAULT_CROP_FACTOR = plan_store.DEFAULT_CROP_FACTOR
 DEFAULT_CANVAS = (768, 768)
 
@@ -198,18 +205,24 @@ def _pairing_preview(clip_frame, still_frame, clip_boxes, still_boxes, plan):
             clip_colour[int(subject["clip_face"])] = colour
         if subject["still_face"] is not None:
             still_colour[int(subject["still_face"])] = colour
-    for face in plan["excluded_faces"]:
+    # The exclusions are per plate: a bare number strikes through the clip's face, an `s` number
+    # the still's. Striking both at the same index would say a bystander had been switched off on
+    # a plate that never had that face at all.
+    off_clip, off_still = plan_store.exclusion_plates(plan["excluded_faces"])
+    for face in off_clip:
         clip_colour[int(face)] = _EXCLUDED_COLOUR
+    for face in off_still:
+        still_colour[int(face)] = _EXCLUDED_COLOUR
 
-    excluded = {int(i) for i in plan["excluded_faces"]}
-    for plate, boxes, colours, scale in ((clip_plate, clip_boxes, clip_colour, 1.0),
-                                         (still_plate, still_boxes, still_colour,
-                                          float(plan["scale"]))):
+    for plate, boxes, colours, scale, off in ((clip_plate, clip_boxes, clip_colour, 1.0,
+                                               set(off_clip)),
+                                              (still_plate, still_boxes, still_colour,
+                                               float(plan["scale"]), set(off_still))):
         for i, box in enumerate(boxes):
             x0, y0, x1, y1 = (float(v) * scale for v in box[:4])
             colour = colours.get(i, _UNSEEDED_COLOUR)
             _draw_rect(plate, x0, y0, x1, y1, colour, thick * (2 if i in colours else 1))
-            if i in excluded:
+            if i in off:
                 _draw_slash(plate, x0, y0, x1, y1, colour, thick)
             _draw_label(plate, x0, max(0.0, y0 - label_h), str(i), glyph,
                         (0.0, 0.0, 0.0), colour)
@@ -231,6 +244,7 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
     run the job at all, so they lead.
     """
     canvas_w, canvas_h = DEFAULT_CANVAS
+    factor = plan_store.plan_crop_factor(plan)
     tw, th = plan["inputs"]["target_size"]
     sw, sh = plan["inputs"]["still_size"]
     scale = float(plan["scale"])
@@ -240,11 +254,20 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
                              f"   match frame {plan['match_frame']}"),
         _line("reference still", f"{sw}x{sh}   still -> clip scale {scale:.3f}"
                                  f"   (1 clip px = {1.0 / scale:.3f} still px)"),
-        _line("cost", f"{plan['subject_count']} subject(s) x {frames} frame(s)"
-                      f" @ {canvas_w}x{canvas_h}"
-                      f"   = {plan['subject_count'] * frames} frame(s) to generate"),
-        _line("", f"(canvas size is H3 Face Track + Crop's;"
-                  f" crops are {DEFAULT_CROP_FACTOR}x face height)"),
+        # An estimate, and labelled as one: the canvas is H3 Face Track + Crop's, set on that
+        # node, and this node cannot see it. Naming the count is the point; naming a size the
+        # plan never measured as if it had is not.
+        _line("cost (estimate)", f"{plan['subject_count']} subject(s) x {frames} frame(s)"
+                                 f" @ {canvas_w}x{canvas_h}"
+                                 f"   = {plan['subject_count'] * frames} frame(s) to generate"),
+        _line("", f"({canvas_w}x{canvas_h} is H3 Face Track + Crop's crop canvas at its shipped "
+                  f"default - what this job generates at is that node's canvas_width/"
+                  f"canvas_height, or its auto canvas)"),
+        # The one rectangle this node does decide, so it is stated with the number that decided
+        # it: a reference cut at a different factor from the tracker's is a mis-framed reference.
+        _line("crop factor", f"{factor:g}   each subject reference was cut at crop_factor "
+                             f"{factor:g} x face height - it must match the crop_factor H3 Face "
+                             f"Track + Crop uses for this job"),
         _line("pairing", f"{plan['inputs']['subject_source']}"
                          f"   tolerance {plan['inputs']['match_tolerance']:.3f}"
                          f" = {plan['tolerance_px']:.0f}px of the {tw}x{th} diagonal"
@@ -254,7 +277,7 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
     if plan["excluded_faces"]:
         lines.append(_line(
             "excluded",
-            f"clip face(s) {', '.join(str(i) for i in plan['excluded_faces'])}"
+            f"{plan_store.describe_exclusions(plan['excluded_faces'])}"
             f" - switched off, so they keep their original pixels"))
     else:
         lines.append(_line("excluded", "none"))
@@ -358,10 +381,14 @@ class H3MultiFacePlan:
                                "clip; lower it in a crowd."}),
                 "excluded_faces": ("STRING", {
                     "default": "", "multiline": False,
-                    "tooltip": "Clip face numbers to switch off, comma-separated, exactly as "
-                               "numbered on this node's preview: 0, 3. An excluded face never "
-                               "becomes a subject and keeps its original pixels. A text "
-                               "widget, so it survives a reload with no front end."}),
+                    "tooltip": "Face numbers to switch off, comma-separated, exactly as "
+                               "numbered on this node's preview: 0, 3. A bare number is a "
+                               "TARGET CLIP face; s2 is a REFERENCE STILL face - the only way "
+                               "to switch off a bystander the photo saw and the clip never "
+                               "did. An excluded face never becomes a subject and keeps its "
+                               "original pixels, and the face paired to it falls to "
+                               "unmatched_faces. A text widget, so it survives a reload with "
+                               "no front end."}),
                 "max_subjects": ("INT", {
                     "default": 0, "min": 0, "max": 64, "step": 1,
                     "tooltip": "0 = no cap. The cap is recorded in the plan for the passes to "
@@ -388,6 +415,24 @@ class H3MultiFacePlan:
                                "still. Conditioning is whole-frame, so H3 chooses which face in "
                                "the still it applies - not a guarantee the right face is used.\n"
                                "A face that did find its partner is unaffected by this."}),
+                # crop_factor (#11 review) is the LAST entry: it is the newest widget, and ComfyUI
+                # replays saved graphs by position (ADR 0002), so everything older stays exactly
+                # where it was. It is a widget on this node only because the subject reference has
+                # to be cut with the tracker's rectangle; the plan still owns the geometry.
+                "crop_factor": ("FLOAT", {
+                    "default": DEFAULT_CROP_FACTOR, "min": 1.2, "max": 8.0, "step": 0.1,
+                    "tooltip": "Set this to the crop_factor that H3 Face Track + Crop will use "
+                               "for THIS job - the same number, on that node.\n\n"
+                               "Each subject reference is cut with the rectangle that factor "
+                               "gives: crop_factor x face height, centred on the face, scaled "
+                               "into the reference still at its native resolution. Left at a "
+                               "different number from the tracker's, EVERY subject reference in "
+                               "the job is mis-framed - the detail H3 is handed sits somewhere "
+                               "else in the crop than the face it belongs to.\n\n"
+                               "Recorded in plan.json, so the overlap warnings, the pairing "
+                               "preview and a resumed job all measure the crops this job really "
+                               "cuts. It joins the pairing fingerprint, because the references "
+                               "already in the job folder were cut at the old number."}),
             },
         }
 
@@ -404,7 +449,8 @@ class H3MultiFacePlan:
 
     def run(self, images, reference_still, detector, confidence, match_frame,
             subject_source, match_tolerance, excluded_faces, max_subjects, job_name,
-            unmatched_faces=plan_store.DEFAULT_UNMATCHED_FACES):
+            unmatched_faces=plan_store.DEFAULT_UNMATCHED_FACES,
+            crop_factor=DEFAULT_CROP_FACTOR):
         import folder_paths
         from .nodes import _load_detector, _to_bgr_u8
 
@@ -464,12 +510,13 @@ class H3MultiFacePlan:
             (width, height), (int(still.shape[1]), int(still.shape[0])),
             frame, str(subject_source), float(match_tolerance),
             plan_store.parse_excluded_faces(excluded_faces), int(max_subjects),
-            str(unmatched_faces))
+            str(unmatched_faces), float(crop_factor))
+
         if not plan["subjects"]:
             if plan["excluded_faces"]:
                 raise ValueError(
                     f"nothing to plan: every face found on frame {frame} is named in "
-                    f"excluded_faces ({', '.join(str(i) for i in plan['excluded_faces'])}). "
+                    f"excluded_faces ({plan_store.describe_exclusions(plan['excluded_faces'])}). "
                     f"Clear the numbers that are not bystanders.")
             if plan["left_out"]:
                 # `leave` spent the whole job. Empty is not an answer anyone wants to queue,
@@ -489,6 +536,16 @@ class H3MultiFacePlan:
 
         name = _derived_job_name(images, job_name)
         job = plan_store.job_dir_for(folder_paths.get_output_directory(), name)
+        # What this plan was measured with, recorded BEFORE the job folder is read: the pairing
+        # fingerprint compares the detector and the confidence, and a plan that has not yet said
+        # which detector it used cannot be compared with a job folder that did. `still_note` says
+        # which image was paired when a batch was wired in.
+        plan["run"] = {"job_name": name, "frames": frames, "detector": str(detector),
+                       "confidence": float(confidence),
+                       "clip_source": (str(getattr(images, "h3_video_name", "") or "")
+                                       or None)}
+        plan["still_note"] = ("the first image of an N-image reference_still batch"
+                              if int(reference_still.shape[0]) > 1 else "")
         if os.path.isfile(plan_store.plan_path(job)):
             # A job folder is one pairing's. The subject references and every pass inside it
             # were cut from the inputs that made this plan, so overwriting it after a widget
@@ -522,10 +579,6 @@ class H3MultiFacePlan:
                                      subject["ref_crop"])
                 subject["ref_file"] = file_name
                 refs += 1
-        plan["run"] = {"job_name": name, "frames": frames, "detector": str(detector),
-                       "confidence": float(confidence),
-                       "clip_source": (str(getattr(images, "h3_video_name", "") or "")
-                                       or None)}
         # #9: the pairing preview is written here too, before the plan is, so a folder that has
         # a plan also has everything the plan says it wrote. The panel reads this file rather
         # than drawing anything, which is what lets it stay read-only.
@@ -616,41 +669,16 @@ def resolve_subject(plan, choice, job_dir=None) -> dict:
     )
 
 
-def _left_to_right_order(boxes) -> list[int]:
-    """Face indices counted left to right, as the pairing preview and Pick faces number them.
-
-    Mirrors the released tracker's own ``left_most`` ranking (nodes.py:866): centre x first,
-    ties settled on the box corner, so two faces at the same height never swap numbers. The
-    tracker scores ``left_most`` as ``-centre_x`` and sorts on the negated score, which lands
-    on ascending centre x - the same order, spelled out here rather than doubled-negated.
-    """
-    return sorted(
-        range(len(boxes)),
-        key=lambda k: ((float(boxes[k][0]) + float(boxes[k][2])) / 2.0,
-                       float(boxes[k][0]), float(boxes[k][1])))
-
-
-def _iou(a, b) -> float:
-    """Overlap of two boxes - the only honest way to say "the face in the plan is that face
-    in the payload", since the plan's detection pass and the picker's may have returned them
-    in a different order."""
-    ax1, ay1, ax2, ay2 = (float(v) for v in a)
-    bx1, by1, bx2, by2 = (float(v) for v in b)
-    inter = (max(0.0, min(ax2, bx2) - max(ax1, bx1))
-             * max(0.0, min(ay2, by2) - max(ay1, by1)))
-    if inter <= 0.0:
-        return 0.0
-    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-    union = area_a + area_b - inter
-    return inter / union if union > 0.0 else 0.0
-
-
 def _planned_face_index(plan_box, on_frame, clip_face, match_frame) -> int:
-    """Which of the payload's boxes on the match frame is the face the plan measured."""
+    """Which of the payload's boxes on the match frame is the face the plan measured.
+
+    Overlap is the only honest way to say it, since the plan's detection pass and the picker's
+    may have returned the same faces in a different order. The measure itself is geometry, so it
+    lives in ``plan_store.box_iou`` and this is only the ranking over the payload's boxes.
+    """
     best, best_iou = None, 0.0
     for i, box in enumerate(on_frame):
-        score = _iou(plan_box, box)
+        score = plan_store.box_iou(plan_box, box)
         if score > best_iou:
             best, best_iou = i, score
     if best is not None and best_iou > 0.0:
@@ -681,8 +709,21 @@ def _shot_lock(all_boxes, start: int, end: int, face_number: int, match_frame: i
     first = match_frame if start <= match_frame < end else start
     for frame in list(range(first, end)) + list(range(start, first)):
         if len(all_boxes[frame]) > face_number:
-            return frame, _left_to_right_order(all_boxes[frame])[face_number]
+            return frame, plan_store.left_to_right_face_order(all_boxes[frame])[face_number]
     return None
+
+
+def _plan_match_frame(plan) -> int:
+    """The frame the plan measured its subjects on - the plan's fact, not the payload's.
+
+    #11 review: this used to be copied into the narrowed `H3FACEPICK` as `plan_match_frame`.
+    ADR 0005 promises the tracker the released picker's key set verbatim, so a value the
+    pass needs has to be asked of the plan (or said in the report), not smuggled through a
+    payload that is meant to be indistinguishable from the loader's. -1 when no plan says.
+    """
+    plan = plan if isinstance(plan, dict) else {}
+    return int(plan.get("match_frame",
+                        (plan.get("inputs") or {}).get("match_frame", -1)))
 
 
 def narrow_pick_to_subject(plan, face_pick, subject) -> dict:
@@ -721,8 +762,7 @@ def narrow_pick_to_subject(plan, face_pick, subject) -> dict:
             f"payload. Re-run H3 Load Video + Face Select."
         )
 
-    match_frame = int((plan or {}).get(
-        "match_frame", ((plan or {}).get("inputs") or {}).get("match_frame", -1)))
+    match_frame = _plan_match_frame(plan)
     if not 0 <= match_frame < frames:
         raise ValueError(
             f"the plan's match frame {match_frame} is outside the {frames} frame(s) this "
@@ -751,7 +791,7 @@ def narrow_pick_to_subject(plan, face_pick, subject) -> dict:
 
     on_match = payload_boxes[match_frame]
     face_index = _planned_face_index(plan_box, on_match, clip_face, match_frame)
-    face_number = _left_to_right_order(on_match).index(face_index)
+    face_number = plan_store.left_to_right_face_order(on_match).index(face_index)
 
     segments = [(int(a), int(b)) for a, b in (face_pick.get("segments") or [])]
     if not segments:
@@ -770,13 +810,19 @@ def narrow_pick_to_subject(plan, face_pick, subject) -> dict:
 
     narrowed = dict(face_pick)
     narrowed["picks"] = picks
-    # Informational, for whoever reads a payload while debugging a pass: the tracker itself
-    # reads boxes, confs, segments, picks, detector and confidence, and nothing else.
-    narrowed["select"] = "subject_plan"
-    narrowed["select_index"] = face_number
-    narrowed["rank_by"] = "left_most"
-    narrowed["subject_index"] = int(subject["index"])
-    narrowed["plan_match_frame"] = match_frame
+    # Only keys the payload ALREADY has get new values, and only their values: ADR 0005 hands
+    # the tracker the released picker's key set verbatim (nodes.py:3353), because a payload
+    # with a key `H3FaceSelect` never writes is a different type labelled `H3FACEPICK`. The
+    # tracker reads boxes, confs, segments, picks, frames, src_size, detector and confidence
+    # from it and nothing else (nodes.py:1315-1551), so these three are informational,
+    # re-pointed at this subject - and a payload that arrived without one leaves without it.
+    # Anything the pass has to say about itself lives on the plan or in the report: whose pass
+    # this is is `subject["index"]` (and the node's `subject_index` output), and the frame it
+    # was measured on is the plan's `match_frame`.
+    for key, value in (("select", "subject_plan"), ("select_index", face_number),
+                       ("rank_by", "left_most")):
+        if key in narrowed:
+            narrowed[key] = value
     return narrowed
 
 
@@ -827,11 +873,15 @@ def subject_report(plan, subject, narrowed, job_dir=None, reference_note: str = 
     subjects = (plan or {}).get("subjects") or []
     picks = narrowed.get("picks") or []
     face_number = int(narrowed.get("select_index", 0))
-    match_frame = narrowed.get("plan_match_frame")
+    # The match frame comes from the plan (#11 review): the payload the tracker sees carries
+    # the released picker's keys and nothing else, so the report asks the plan that measured
+    # it rather than reading a key Subject Select invented.
+    match_frame = _plan_match_frame(plan)
     paired = subject.get("still_face") is not None
     on_match = 0
     try:
-        on_match = len((narrowed.get("boxes") or [])[int(match_frame)])
+        if match_frame >= 0:
+            on_match = len((narrowed.get("boxes") or [])[int(match_frame)])
     except (IndexError, TypeError, ValueError):
         on_match = 0
 
@@ -1114,6 +1164,16 @@ def checked_subject(plan, choice) -> int:
     return index
 
 
+def _expected_chain_base(plan, index):
+    """What THIS plan's order says subject `index` composites onto: the target clip for the first
+    subject, the previous subject for every later one. The composite checks the same rule from the
+    manifest, so both ends of the chain quote one answer (ADR 0006)."""
+    order = plan_store.plan_subject_indices(plan)
+    if index not in order or order.index(index) == 0:
+        return plan_store.CHAINED_TO_CLIP
+    return order[order.index(index) - 1]
+
+
 def checked_image_batch(images, label: str) -> tuple[int, int, int]:
     """An IMAGE batch, as (frames, width, height) - float 0-1, or say so plainly."""
     if images is None or int(images.dim()) != 4:
@@ -1200,6 +1260,27 @@ class H3PassSave:
                                "stage=crops - without them the crops cannot be put back where "
                                "they were cut. For stage=stitched there is nothing new to "
                                "record, so leave it unwired."}),
+                # chained_from (#11 review) is appended AFTER transform for the same reason the
+                # required widgets are appended at the end: ComfyUI replays saved graphs by
+                # position (ADR 0002), so nothing that already existed moves.
+                "chained_from": ("INT", {
+                    "default": plan_store.CHAINED_TO_CLIP,
+                    "min": plan_store.CHAINED_TO_CLIP, "max": MAX_SUBJECT_CHOICES - 1, "step": 1,
+                    "tooltip": "Which plate THIS pass was composited onto: -1 means the target "
+                               "clip; any other number is the subject whose stitched result this "
+                               "pass was composited onto.\n\n"
+                               "H3 Multi-Face Composite returns the LAST subject's stitched "
+                               "frames on the claim that every earlier pass is already carried "
+                               "inside them. That is only true if each pass was composited onto "
+                               "the previous pass's result, which no node in the graph can see - "
+                               "so it is declared here and checked there.\n\n"
+                               "For the first pass in the plan's order, leave it at -1. For every "
+                               "later pass, set it to the subject before it: subject 1 says 0, "
+                               "subject 2 says 1. Wire every pass onto the target clip instead "
+                               "and each pass throws the previous subject's work away, so the "
+                               "finished clip ends up with exactly one refined face in it. The "
+                               "composite refuses when what is declared here contradicts the "
+                               "plan's order."}),
             },
         }
 
@@ -1211,7 +1292,8 @@ class H3PassSave:
     OUTPUT_NODE = True
     CATEGORY = CATEGORY
 
-    def run(self, plan, subject, stage, images, transform=None):
+    def run(self, plan, subject, stage, images, transform=None,
+            chained_from=plan_store.CHAINED_TO_CLIP):
         plan = checked_plan(plan)
         job = job_folder_for_plan(plan, "H3 Pass Save")
         # Refuse before two pairings mix: the plan in the graph against the plan.json already
@@ -1222,6 +1304,10 @@ class H3PassSave:
         index = checked_subject(plan, subject)
         name = plan_store.checked_stage(stage)
         count, width, height = checked_image_batch(images, "images")
+        # #11 review: this is the node that knows what it was composited onto, so this is where
+        # the chain is DECLARED. H3 Multi-Face Composite reads it back and refuses if it
+        # contradicts the plan's own order, instead of asserting the chain it cannot see.
+        base = plan_store.checked_chained_from(plan, index, chained_from)
 
         files = plan_store.stage_files(job, index, name, count)
         os.makedirs(os.path.dirname(files[0]), exist_ok=True)
@@ -1231,7 +1317,10 @@ class H3PassSave:
 
         written = {"frames": count, "width": width, "height": height,
                    "first": os.path.basename(files[0]),
-                   "last": os.path.basename(files[-1])}
+                   "last": os.path.basename(files[-1]),
+                   # The declared chain, recorded with the stage it describes so the composite
+                   # can check the claim against the plan order instead of asserting it.
+                   "chained_from": base}
         note = ""
         if name == "crops":
             if transform is None:
@@ -1254,6 +1343,14 @@ class H3PassSave:
         plan_store.record_pass_stage(job, index, name, written)
         complete = 1 if plan_store.pass_is_complete(job, index) else 0
         lines = _checkpoint_report_lines(job, index, name, written, complete, note)
+        # The declared chain, echoed back so a wrong widget is visible at the node that took it
+        # and not only at the composite that refuses on it 20 minutes of generation later.
+        expected = plan_store.chain_label(_expected_chain_base(plan, index))
+        lines.append(_line("chained onto", plan_store.chain_label(base))
+                     + ("" if base == expected else
+                        f"   NOTE: this plan composites subject {index} onto {expected}, so H3 "
+                        f"Multi-Face Composite will refuse on that unless the passes really were "
+                        f"chained differently"))
         # #6: the shot account, now measured against what this pass actually produced. Derived
         # from the payload already wired - the tracker's transform for stage=crops, otherwise the
         # crops.json this pass checkpointed earlier - so no widget is added and no saved graph
@@ -1423,9 +1520,9 @@ class H3MultiFaceComposite:
                                "node can PROVE the chain is complete: every recorded stitched pass "
                                "has to hold this many frames at this size, or the frames in the "
                                "job folder are not this clip's."
-                               "\n\nThe finished clip's audio is this clip's audio. These nodes "
-                               "carry image batches only, so each pass's generated audio was "
-                               "discarded - wire this clip's own audio into your save node."}),
+                               "\n\nThis node carries image batches only and touches no audio at all, so each pass's generated audio was "
+                               "discarded by never being wired anywhere - whatever audio the "
+                                "finished video has comes from this clip, where you assemble it."}),
                 "overlap_threshold": ("FLOAT", {
                     "default": plan_store.DEFAULT_OVERLAP_THRESHOLD, "min": 0.0, "max": 1.0,
                     "step": 0.01, "round": 0.001,
@@ -1464,6 +1561,15 @@ class H3MultiFaceComposite:
             raise ValueError(
                 "this plan has no subjects, so there is nothing to composite: H3 Multi-Face Plan "
                 f"found no faces, or every face was excluded. Sort the plan in {job} out first.")
+
+        # #11 review: what each pass was composited onto is an INTENT the pass declares on H3 Pass
+        # Save, not a fact this node can see - the wiring lives in the user's graph. A pass wired
+        # onto the target clip instead of the previous pass's result silently drops every earlier
+        # subject from the finished clip, so a declaration that contradicts the plan's own order
+        # is refused here instead of being reported afterwards as though it had been honoured.
+        chain = plan_store.chain_check(plan, job)
+        if chain["wrong"]:
+            raise ValueError(f"H3 Multi-Face Composite refuses: {plan_store.chain_error(chain)}")
 
         stage = "stitched"   # the stage that completes a pass, and the only one that is composited
         recorded = {}
@@ -1530,10 +1636,11 @@ class H3MultiFaceComposite:
         warnings = plan_store.overlapping_subject_pairs(plan, overlap_threshold)
         frame = (plan or {}).get("match_frame")
         lines = [f"job folder: {job}",
-                 f"order: {_order_line(order)}   plan order = left to right at match frame {frame}",
-                 f"chained: each pass composited onto the previous pass's stitched result and the "
-                 f"first onto the target clip. Nothing is blended here: H3 Face Stitch feathered "
-                 f"each pass once, and feathering a feathered edge again softens the work"]
+                 f"order: {_order_line(order)}   plan order = left to right at match frame {frame}"]
+        # The chain in the voice of what was actually recorded: what each pass DECLARED it was
+        # composited onto on H3 Pass Save, or the gap where a pass declared nothing. This node
+        # cannot see the graph's wiring, so it never says the passes were chained on its own.
+        lines.extend(plan_store.chain_lines(chain))
         for index in order:
             entry = recorded[index]
             size = (f"{int(entry['width'])}x{int(entry['height'])}px"
@@ -1542,8 +1649,10 @@ class H3MultiFaceComposite:
                          f"{plan_store.stage_dir(job, index, stage)}")
         if len(order) > 1:
             carried = ", ".join(f"subject {i}" for i in order[:-1])
-            lines.append(f"final result: subject {final}'s stitched frames   those {frames} "
-                         f"frame(s) already carry {carried} composited into them")
+            lines.append(f"final result: subject {final}'s stitched frames   this node hands back "
+                         f"those {frames} frame(s) and blends nothing: they carry {carried} in "
+                         f"them only if each of those passes was composited onto the one before "
+                         f"it, which the chain line above says - or says nobody declared")
         else:
             lines.append(f"final result: subject {final}'s stitched frames   this job has one "
                          f"pass, so those {frames} frame(s) are it on the target clip")
@@ -1556,9 +1665,10 @@ class H3MultiFaceComposite:
         if not warnings:
             lines.append(f"no overlapping subject crop regions at match frame {frame} "
                          f"(threshold {float(overlap_threshold):g})")
-        lines.append("audio: the finished clip carries the target clip's audio. Each pass's "
-                     "generated audio was discarded - these nodes only ever carry image batches, "
-                     "so wire the target clip's own audio into your save node.")
+        lines.append("audio: this node carries images only and touches no audio at all. Whatever "
+                     "audio the finished clip has comes from the target clip, at the point where "
+                     "you assemble the video - and each pass's generated audio is discarded by "
+                     "never being wired anywhere.")
 
         report = "\n".join(lines)
         print("[H3MultiFaceComposite] " + report.replace("\n", "\n[H3MultiFaceComposite] "))

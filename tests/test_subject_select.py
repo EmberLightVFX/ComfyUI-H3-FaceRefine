@@ -115,7 +115,45 @@ def test_the_narrowed_payload_carries_every_frame_of_the_clip():
     assert narrowed["src_size"] == (W, H)
     assert narrowed["detector"] == payload["detector"]
     assert narrowed["confidence"] == payload["confidence"]
-    assert narrowed["subject_index"] == plan["subjects"][0]["index"]
+    assert narrowed["version"] == payload["version"]
+    assert narrowed["identity_scores"] == payload["identity_scores"]
+
+
+def test_narrowing_adds_no_key_the_picker_does_not_emit_and_removes_none():
+    """ADR 0005 in one sentence: the narrowed payload has the picker's key set, verbatim.
+
+    `H3FACEPICK` is a promise about a shape, not a label. `H3FaceSelect` writes this set
+    (nodes.py:3353) and `H3 Face Track + Crop` reads frames, src_size, segments, picks,
+    boxes, detector and confidence out of it (nodes.py:1315-1551), so a key the picker never
+    writes makes the narrowed payload a different type wearing the old name - and the tracker
+    would not read it even then. Whatever a pass needs to know about itself therefore rides
+    on the plan or in the report, which is where these values are reachable from now.
+    """
+    payload = _payload()
+    plan = _plan(payload)
+    subject = plan["subjects"][1]
+    narrowed = m.narrow_pick_to_subject(plan, payload, subject)
+
+    assert set(narrowed) == set(payload)
+    assert "subject_index" not in narrowed and "plan_match_frame" not in narrowed
+
+    # The pick ENTRIES are shape-checked too: a per-shot entry the released producer never
+    # writes would be just as foreign to the tracker as a top-level key it has never seen.
+    assert [sorted(p) for p in narrowed["picks"]] == [sorted(p) for p in payload["picks"]]
+
+    # A payload arriving with fewer keys leaves just as thin as it came, so nothing here
+    # quietly "completes" it into a shape the loader did not produce.
+    thin = {k: v for k, v in payload.items() if k not in ("identity_scores", "rank_by")}
+    assert set(m.narrow_pick_to_subject(plan, thin, subject)) == set(thin)
+
+    # And the two values that used to ride along are still reachable, plus still readable:
+    # whose pass this is comes from the plan (it is also the node's `subject_index` output),
+    # and the frame the plan measured comes from the plan's own `match_frame`.
+    assert subject["index"] == 1
+    assert plan["match_frame"] == MATCH_FRAME
+    report = m.subject_report(plan, subject, narrowed)
+    assert "subject 1 of 2" in report
+    assert f"measured on match frame {MATCH_FRAME}" in report
 
 
 def test_the_picks_are_one_per_shot_for_this_subject_only():

@@ -21,7 +21,7 @@ PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 WIDGET_ORDER = ["detector", "confidence", "match_frame", "subject_source",
                 "match_tolerance", "excluded_faces", "max_subjects", "job_name",
-                "unmatched_faces"]
+                "unmatched_faces", "crop_factor"]
 
 SUBJECT_WIDGET_ORDER = ["subject"]
 
@@ -99,12 +99,23 @@ def test_the_widget_defaults_are_what_the_feature_promises():
 
 
 def test_the_plan_run_takes_its_inputs_in_schema_order():
-    """ComfyUI calls FUNCTION with the required inputs positionally. `unmatched_faces` sits at
-    the END of both lists, which is the only place a new widget may go (ADR 0002)."""
+    """ComfyUI calls FUNCTION with the required inputs positionally. `crop_factor` sits at the
+    END of both lists, which is the only place a new widget may go (ADR 0002): `unmatched_faces`
+    was the last entry and stays in twelfth place."""
     schema = m.H3MultiFacePlan.INPUT_TYPES()
     args = [p for p in inspect.signature(m.H3MultiFacePlan.run).parameters if p != "self"]
     assert args == list(schema["required"])
-    assert args[-1] == "unmatched_faces"
+    assert args[-1] == "crop_factor"
+    assert args[-2] == "unmatched_faces"
+
+
+def test_the_crop_factor_widget_is_the_tracker_s_default_and_range():
+    """The widget exists so the subject references get cut at the rectangle the tracker will
+    crop at, so its default and its range are that node's - not this one's invention."""
+    name = m.H3MultiFacePlan.INPUT_TYPES()["required"]["crop_factor"]
+    assert name[0] == "FLOAT"
+    assert name[1]["default"] == ps.DEFAULT_CROP_FACTOR == 2.5
+    assert name[1]["min"] == 1.2 and name[1]["max"] == 8.0
 
 
 def test_the_subject_node_is_registered_in_its_own_module():
@@ -194,10 +205,14 @@ def test_the_pass_nodes_reuse_the_released_types_rather_than_inventing_new_ones(
 def test_the_pass_save_inputs_and_widgets_are_in_this_exact_order():
     schema = m.H3PassSave.INPUT_TYPES()
     assert list(schema["required"]) == ["plan"] + PASS_SAVE_ORDER
-    assert list(schema["optional"]) == ["transform"]
+    # chained_from is APPENDED after transform: ComfyUI replays saved graphs by position
+    # (ADR 0002), so a new optional widget goes at the end of the optional block.
+    assert list(schema["optional"]) == ["transform", "chained_from"]
     assert schema["required"]["plan"][0] == m.H3FACEPLAN
     assert schema["required"]["images"][0] == "IMAGE"
     assert schema["optional"]["transform"][0] == "H3FACEXFORM"
+    assert schema["optional"]["chained_from"][0] == "INT"
+    assert schema["optional"]["chained_from"][1]["default"] == ps.CHAINED_TO_CLIP == -1
     assert schema["required"]["subject"][0] == "INT"
     assert list(schema["required"]["stage"][0]) == list(ps.PASS_STAGES)
     assert schema["required"]["stage"][1]["default"] == "crops"
