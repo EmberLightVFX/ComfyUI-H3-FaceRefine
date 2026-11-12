@@ -90,6 +90,18 @@ _Avoid_: face list, track list, plan file (that's where it lives, not what it is
 A face found at the match frame that the user has switched off, so it never becomes a subject and keeps its original pixels.
 _Avoid_: disabled face, ignored face, skipped track
 
+**Unpaired face**:
+A face found on one plate at the match frame with no partner on the other. What becomes of it is the plan's `unmatched_faces` setting - leave, no reference, or the whole reference still - decided once, in the plan, because it shapes the subject set.
+_Avoid_: orphan face, missed match, unmatched subject
+
+**Left-out face**:
+An unpaired face the plan did not make a subject of (`unmatched_faces=leave`), so no pass runs for it and it keeps its original pixels. Expected behaviour and the safe default, not a failure, and not an excluded face - nobody switched it off.
+_Avoid_: excluded face, skipped subject, dropped face
+
+**Whole-still reference**:
+A subject reference that is the entire reference still instead of a crop of it (`unmatched_faces=with_still`), used for a subject with no paired face in the still. Conditioning is whole-frame, so which face in the still H3 applies is not guaranteed.
+_Avoid_: full-frame reference, fallback crop, whole-image reference
+
 ## Distinguish these three "references"
 
 - **Reference still** — the high-quality image of the whole scene.

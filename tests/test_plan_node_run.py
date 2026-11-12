@@ -267,3 +267,36 @@ def test_changing_the_mode_against_an_existing_job_folder_refuses(pack, monkeypa
     assert "unmatched_faces" in text
     assert "no_reference" in text and "with_still" in text
 
+
+def test_the_reference_reader_hands_back_the_whole_still_for_a_whole_still_subject(pack,
+                                                                                  monkeypatch,
+                                                                                  tmp_path):
+    """Subject Select's existing reference loading, unchanged and with no new widget: a whole
+    still goes in, so a whole still comes back out, at its own size, and the note says what it
+    is rather than describing a crop."""
+    plan, _, _, _ = _run(pack, monkeypatch, mode="with_still", job_name="whole still sel")
+    subject = [s for s in plan["subjects"] if s["ref_kind"] == "still"][0]
+
+    reference, exists, note = pack.multi_face_nodes.load_subject_reference(
+        str(tmp_path / "output" / "whole still sel"), subject)
+
+    assert exists == 1 and reference is not None
+    assert tuple(reference.shape) == (1, 2000, 2000, 3)
+    assert "WHOLE reference still" in note
+    assert "whole-frame" in note
+
+
+def test_the_reference_reader_still_says_so_for_a_no_reference_subject(pack, monkeypatch,
+                                                                      tmp_path):
+    """`none` is still a normal state of a plan: nothing is invented, and the wording names the
+    widget that decided it."""
+    plan, _, _, _ = _run(pack, monkeypatch, mode="no_reference", job_name="no ref sel")
+    subject = [s for s in plan["subjects"] if s["ref_kind"] == "none"][0]
+
+    reference, exists, note = pack.multi_face_nodes.load_subject_reference(
+        str(tmp_path / "output" / "no ref sel"), subject)
+
+    assert reference is None and exists == 0
+    assert "no subject reference" in note
+    assert "unmatched_faces" in note
+
