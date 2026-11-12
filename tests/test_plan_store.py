@@ -68,7 +68,7 @@ def test_centres_within_reach_but_no_overlap_are_not_a_pair():
     """The tolerance alone is not enough: two faces have to be the same face's two
     detections, which means their boxes have to touch."""
     clip = [[0, 0, 200, 200], [300, 0, 500, 200]]      # disjoint, centres 300px apart
-    still = [[0, 0, 200, 200], [262, 0, 462, 200]]     # centre 262px from clip face 1
+    still = [[0, 0, 200, 200], [600, 0, 800, 200]]     # centre 300px from clip face 1
 
     got = ps.pair_faces(clip, still, (1000, 1000), (1000, 1000), 0.25)   # reach 353.6px
 
