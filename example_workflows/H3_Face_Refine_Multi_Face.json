@@ -437,7 +437,7 @@
     }
    },
    "widgets_values": [
-    "MiniMax H3\\minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+    "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
     "default"
    ],
    "title": "H3 model"
@@ -500,7 +500,7 @@
     }
    },
    "widgets_values": [
-    "MiniMax H3\\minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+    "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
     1
    ],
    "title": "Turbo LoRA - steps must match"
@@ -554,7 +554,7 @@
     }
    },
    "widgets_values": [
-    "MiniMax H3\\minimax_h3_video_vae_fp16.safetensors"
+    "minimax_h3_video_vae_fp16.safetensors"
    ],
    "title": "Load VAE - video"
   },
@@ -605,7 +605,7 @@
     }
    },
    "widgets_values": [
-    "MiniMax H3\\minimax_h3_audio_vae_fp32.safetensors"
+    "minimax_h3_audio_vae_fp32.safetensors"
    ],
    "title": "Load VAE - audio"
   },
@@ -779,7 +779,7 @@
     }
    },
    "widgets_values": [
-    "MODEL FILES THIS TEMPLATE EXPECTS\n\nThe same filenames the other two templates ship - swap them for what is in your models folder.\n\nUNETLoader (diffusion_models):  MiniMax H3/minimax_h3_fl2va_pruned_int8_convrot.safetensors\nCLIPLoader (text_encoders):     qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors\nLoraLoaderModelOnly (loras):    MiniMax H3/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors\nVAELoader (vae):                MiniMax H3/minimax_h3_video_vae_fp16.safetensors\nVAELoader (vae):                MiniMax H3/minimax_h3_audio_vae_fp32.safetensors\nface detector:                  bbox/face_yolov8m.pt\n\nThe LoRA and the step count have to agree: steps=8 on both BasicScheduler nodes, because that LoRA is the 8-step one.\n\nThe detector on H3 Multi-Face Plan and on H3 Load Video + Face Select must be the SAME model: the plan pairs the two plates positionally, and two different detectors do not agree about which box belongs to whom."
+    "MODEL FILES THIS TEMPLATE EXPECTS\n\nThe same filenames the other two templates ship - swap them for what is in your models folder.\n\nUNETLoader (diffusion_models):  minimax_h3_fl2va_pruned_int8_convrot.safetensors\nCLIPLoader (text_encoders):     qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors\nLoraLoaderModelOnly (loras):    minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors\nVAELoader (vae):                minimax_h3_video_vae_fp16.safetensors\nVAELoader (vae):                minimax_h3_audio_vae_fp32.safetensors\nface detector:                  bbox/face_yolov8m.pt\n\nThe LoRA and the step count have to agree: steps=8 on both BasicScheduler nodes, because that LoRA is the 8-step one.\n\nThe detector on H3 Multi-Face Plan and on H3 Load Video + Face Select must be the SAME model: the plan pairs the two plates positionally, and two different detectors do not agree about which box belongs to whom."
    ],
    "title": "Model files this template expects"
   },
