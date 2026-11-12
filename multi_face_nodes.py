@@ -243,9 +243,14 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
     else:
         lines.append(_line("excluded", "none"))
     if plan["inputs"]["max_subjects"]:
-        lines.append(_line("max_subjects", f"{plan['inputs']['max_subjects']}"
-                                           f" (recorded in the plan; the passes act"
-                                           f" on it)"))
+        lines.append(_line("max_subjects", str(plan["inputs"]["max_subjects"])))
+    # #10: a tail cut has to be loud. Every dropped face is named where the user can find it, and
+    # the number the cap saved sits next to the number the cap spends.
+    for cap_line in plan_store.capped_lines(plan):
+        lines.append(_line("capped", cap_line))
+    capped_cost = plan_store.uncapped_cost_line(plan, frames)
+    if capped_cost:
+        lines.append(_line("", capped_cost))
 
     counts = plan_store.subject_kind_counts(plan)
     lines.append(_line(
@@ -474,11 +479,16 @@ class H3MultiFacePlan:
             # changed would leave a folder holding two pairings' work - and the stitch node
             # would happily composite them into one clip. Same inputs is a resume, and has to
             # stay possible or no job could ever be re-run.
+            stored = plan_store.read_plan(job)
             plan_store.check_pairing_inputs(
-                plan_store.read_plan(job), plan, job,
+                stored, plan, job,
                 f"Set job_name to a new name for this pairing, or delete/rename {job} if you "
                 f"mean to re-plan this one from scratch: the subject references and every "
                 f"pass saved in it were cut from the inputs above.")
+            old_plan = plan_store.plan_version_note(stored)
+            if old_plan:
+                # Read, not migrated: the folder is only stale if the fingerprint says so.
+                notes.append(old_plan)
         os.makedirs(job, exist_ok=True)
 
         # The crops are cut and written BEFORE the plan is written, so the plan records the

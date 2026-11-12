@@ -23,7 +23,18 @@ import numpy as np
 
 # Bumped when the plan's shape changes, so a job folder written by an older pack is
 # recognised rather than half-read.
-PLAN_VERSION = 1
+#
+#   1  the plan as first written
+#   2  #10: max_subjects truncates the subject set, so a plan gained `capped_out`
+#
+# Version 1 stays READABLE rather than migrated or refused for being old. It already recorded
+# `max_subjects` in `inputs` even though nothing acted on it, so the honest rule is the cheap
+# one: read an old plan as it stands, say which version the folder was written with, and let the
+# pairing fingerprint decide - it compares max_subjects now, so an old folder that genuinely
+# disagrees about the cap is refused naming the difference, and one that agrees is the same job.
+# Anything outside PLAN_READABLE_VERSIONS is refused by number rather than half-read.
+PLAN_VERSION = 2
+PLAN_READABLE_VERSIONS = (1, PLAN_VERSION)
 PLAN_FILENAME = "plan.json"
 
 SUBJECT_SOURCES = ("target_clip", "reference_still", "union")
@@ -574,6 +585,31 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     # keys, the reference file names and the composite order all count on that.
     for index, subject in enumerate(subjects):
         subject["index"] = index
+
+    # The cap (#10) spends the generations on purpose. The first N faces in the order the job
+    # runs them are the job; the tail is dropped, and dropped LAST because `leave` (#8) already
+    # took the unpaired faces out first - nobody is named twice. A dropped face follows #8's rule
+    # for a left-out face: `index: None`, so it can never be numbered, selected, reach `next`, or
+    # be indexed into a pass folder. It keeps where it stood on the match frame so the report can
+    # name each one instead of cutting the tail quietly.
+    cap = int(max_subjects or 0)
+    capped_out: list = []
+    if cap and len(subjects) > cap:
+        for subject in subjects[cap:]:
+            # A clip face is named by its own box; a face only the still ever saw is named by
+            # that box scaled into the clip, which is where it would have stood in the order.
+            box = subject.get("clip_box")
+            if box is None and subject.get("still_box") is not None:
+                box = [float(v) * float(scale) for v in subject["still_box"]]
+            if box:
+                subject["match_x"] = round((float(box[0]) + float(box[2])) / 2.0, 1)
+                subject["match_y"] = round((float(box[1]) + float(box[3])) / 2.0, 1)
+            else:
+                subject["match_x"] = subject["match_y"] = None
+            subject["capped_by"] = cap
+            subject["index"] = None
+            capped_out.append(subject)
+        subjects = subjects[:cap]
     return {
         "version": PLAN_VERSION,
         "match_frame": frame,
@@ -604,6 +640,10 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
         # Faces `unmatched_faces=leave` took out of the subject set. Not subjects, so no pass
         # ever runs for them - which is why they keep their original pixels.
         "left_out": left_out,
+        # Faces `max_subjects` dropped so the generations get spent elsewhere (#10). They found a
+        # partner and would have been subjects; the cap said otherwise. This is where that
+        # decision stays readable afterwards, and why the report can still name them.
+        "capped_out": capped_out,
     }
 
 
@@ -746,6 +786,76 @@ def _json_default(value):
     raise TypeError(f"a subject plan cannot hold a {type(value).__name__}")
 
 
+def _capped_label(subject, frame) -> str:
+    """How a face the cap dropped is named in the report.
+
+    The numbers are the ones a user reads off the pairing preview, so a clip face is named in the
+    clip's own pixels and a face only the still ever saw is named where it would have stood.
+    """
+    entry = subject or {}
+    where = f"frame {frame}" if frame is not None else "the match frame"
+    box = entry.get("clip_box")
+    if box:
+        cx = int(round((float(box[0]) + float(box[2])) / 2.0))
+        cy = int(round((float(box[1]) + float(box[3])) / 2.0))
+        return f"clip face {int(entry['clip_face'])} (at {cx}, {cy} on {where})"
+    x, y = entry.get("match_x"), entry.get("match_y")
+    still_face = entry.get("still_face")
+    name = f"still face {int(still_face)}" if still_face is not None else "a face the clip never saw"
+    if x is None or y is None:
+        return f"{name} (on {where})"
+    return f"{name} (at {int(round(float(x)))}, {int(round(float(y)))} on {where})"
+
+
+def capped_lines(plan) -> list:
+    """The truncation sentence, naming every face the cap dropped.
+
+    A tail cut in silence reads like the pairing went wrong, so this never returns a bare count:
+    each dropped face is named with the position a user can find it at, and the sentence says what
+    to do about it. Empty when nobody was dropped.
+    """
+    inputs = (plan or {}).get("inputs") or {}
+    cap = int(inputs.get("max_subjects") or 0)
+    dropped = (plan or {}).get("capped_out") or []
+    if not cap or not dropped:
+        return []
+    frame = (plan or {}).get("match_frame")
+    named = ", ".join(_capped_label(subject, frame) for subject in dropped)
+    return [f"subject cap {cap}: {len(dropped)} face(s) dropped - {named}. "
+            f"Raise max_subjects to include them, or switch a face off with excluded_faces to "
+            f"spend those generations elsewhere on purpose."]
+
+
+def uncapped_cost_line(plan, frames) -> str:
+    """What the job would have cost without the cap, next to what it costs with it.
+
+    The cap's whole point is generations saved, so the number it saved has to sit beside the
+    number it spends. Empty when the cap changed nothing.
+    """
+    dropped = len((plan or {}).get("capped_out") or [])
+    if not dropped:
+        return ""
+    running = int((plan or {}).get("subject_count") or 0)
+    total = running + dropped
+    return (f"{running} subject(s) of {total} to generate; uncapped cost would be "
+            f"{total} subject(s) x {int(frames)} frame(s)")
+
+
+def plan_version_note(plan) -> str:
+    """What to tell the user about the plan format version a job folder was written with.
+
+    An old folder is understood, not migrated - so this is an explanation, not a warning. The
+    pairing fingerprint is what refuses a genuinely different job; the version number only says
+    which pack wrote the folder.
+    """
+    version = int((plan or {}).get("version") or 0)
+    if version in PLAN_READABLE_VERSIONS and version != PLAN_VERSION:
+        return (f"this job folder was written with plan format version {version}; this pack "
+                f"writes version {PLAN_VERSION}. The plan is read as it stands - the pairing "
+                f"fingerprint, not the version number, is what refuses a different job.")
+    return ""
+
+
 def write_plan(job_dir, plan: dict) -> str:
     """Write the subject plan into the job folder, making the folder if need be.
 
@@ -781,6 +891,13 @@ def read_plan(job_dir) -> dict:
         plan = json.load(fh)
     if not isinstance(plan, dict):
         raise ValueError(f"{path} does not hold a subject plan")
+    version = int(plan.get("version") or 0)
+    if version not in PLAN_READABLE_VERSIONS:
+        readable = ", ".join(str(v) for v in PLAN_READABLE_VERSIONS)
+        raise ValueError(
+            f"{path} was written with plan format version {version}, which this pack cannot "
+            f"read - it reads version {readable}. Re-run H3 Multi-Face Plan to write a plan this "
+            f"pack understands, into a job_name of its own.")
     return plan
 
 
@@ -1160,7 +1277,11 @@ def read_positions(job_dir, subject) -> dict:
 # compared whatever the widgets say.
 
 PAIRING_INPUT_FIELDS = ("target_size", "still_size", "match_frame", "subject_source",
-                        "match_tolerance", "excluded_faces", "unmatched_faces")
+                        "match_tolerance", "excluded_faces", "unmatched_faces",
+                        # #10: the cap used to be inert, so it stayed out of the fingerprint. It
+                        # truncates the subject set now, so two caps are two jobs - and the
+                        # fingerprint, not the plan version number, is what says so.
+                        "max_subjects")
 
 
 def _normalise(value):
