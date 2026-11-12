@@ -610,3 +610,29 @@ def test_a_crop_factor_that_cannot_crop_anything_is_refused():
         _plan(crop_factor=0.0)
     assert "crop_factor" in str(exc.value)
 
+
+# --- geometry the plan module owns --------------------------------------------------
+#
+# `overlapping_subject_pairs` and the subject-select node used to measure the same overlap and
+# count the same faces in two places. These pin the one measure now that it has one home: the
+# score between two face boxes, and the number a face carries on a frame.
+
+def test_a_face_overlaps_the_box_that_covers_it():
+    """The overlap score is how this module says "that detection is this face": fully on itself,
+    a quarter on a box inside it, nothing on a box that merely touches."""
+    face = [100, 100, 200, 220]
+    assert ps.box_iou(face, face) == 1.0
+    assert ps.box_iou(face, [100, 100, 150, 160]) == pytest.approx(0.25)
+    assert ps.box_iou(face, [200, 220, 300, 320]) == 0.0
+
+
+def test_faces_on_a_frame_are_numbered_the_way_the_picker_numbers_them():
+    """A subject's face NUMBER is the box counted left to right on that frame, whatever order the
+    detector returned them in - and a centre-x tie is settled on the box corner, which is the
+    released tracker's rule and deliberately not the rule that orders the plan's subjects."""
+    boxes = [[400, 120, 520, 260], [100, 100, 200, 220], [250, 150, 350, 300]]
+    assert ps.left_to_right_face_order(boxes) == [1, 2, 0]
+
+    tied = [[-40, 100, 60, 220], [0, 100, 20, 108]]      # both centred at x = 10
+    assert ps.left_to_right_face_order(tied) == [0, 1]
+

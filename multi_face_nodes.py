@@ -669,41 +669,16 @@ def resolve_subject(plan, choice, job_dir=None) -> dict:
     )
 
 
-def _left_to_right_order(boxes) -> list[int]:
-    """Face indices counted left to right, as the pairing preview and Pick faces number them.
-
-    Mirrors the released tracker's own ``left_most`` ranking (nodes.py:866): centre x first,
-    ties settled on the box corner, so two faces at the same height never swap numbers. The
-    tracker scores ``left_most`` as ``-centre_x`` and sorts on the negated score, which lands
-    on ascending centre x - the same order, spelled out here rather than doubled-negated.
-    """
-    return sorted(
-        range(len(boxes)),
-        key=lambda k: ((float(boxes[k][0]) + float(boxes[k][2])) / 2.0,
-                       float(boxes[k][0]), float(boxes[k][1])))
-
-
-def _iou(a, b) -> float:
-    """Overlap of two boxes - the only honest way to say "the face in the plan is that face
-    in the payload", since the plan's detection pass and the picker's may have returned them
-    in a different order."""
-    ax1, ay1, ax2, ay2 = (float(v) for v in a)
-    bx1, by1, bx2, by2 = (float(v) for v in b)
-    inter = (max(0.0, min(ax2, bx2) - max(ax1, bx1))
-             * max(0.0, min(ay2, by2) - max(ay1, by1)))
-    if inter <= 0.0:
-        return 0.0
-    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-    union = area_a + area_b - inter
-    return inter / union if union > 0.0 else 0.0
-
-
 def _planned_face_index(plan_box, on_frame, clip_face, match_frame) -> int:
-    """Which of the payload's boxes on the match frame is the face the plan measured."""
+    """Which of the payload's boxes on the match frame is the face the plan measured.
+
+    Overlap is the only honest way to say it, since the plan's detection pass and the picker's
+    may have returned the same faces in a different order. The measure itself is geometry, so it
+    lives in ``plan_store.box_iou`` and this is only the ranking over the payload's boxes.
+    """
     best, best_iou = None, 0.0
     for i, box in enumerate(on_frame):
-        score = _iou(plan_box, box)
+        score = plan_store.box_iou(plan_box, box)
         if score > best_iou:
             best, best_iou = i, score
     if best is not None and best_iou > 0.0:
@@ -734,7 +709,7 @@ def _shot_lock(all_boxes, start: int, end: int, face_number: int, match_frame: i
     first = match_frame if start <= match_frame < end else start
     for frame in list(range(first, end)) + list(range(start, first)):
         if len(all_boxes[frame]) > face_number:
-            return frame, _left_to_right_order(all_boxes[frame])[face_number]
+            return frame, plan_store.left_to_right_face_order(all_boxes[frame])[face_number]
     return None
 
 
@@ -804,7 +779,7 @@ def narrow_pick_to_subject(plan, face_pick, subject) -> dict:
 
     on_match = payload_boxes[match_frame]
     face_index = _planned_face_index(plan_box, on_match, clip_face, match_frame)
-    face_number = _left_to_right_order(on_match).index(face_index)
+    face_number = plan_store.left_to_right_face_order(on_match).index(face_index)
 
     segments = [(int(a), int(b)) for a, b in (face_pick.get("segments") or [])]
     if not segments:

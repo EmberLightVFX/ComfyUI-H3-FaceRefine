@@ -147,6 +147,46 @@ def _overlap_area(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.clip(right - left, 0.0, None) * np.clip(bottom - top, 0.0, None)
 
 
+def box_iou(a, b) -> float:
+    """Intersection over union of two ``[x1, y1, x2, y2]`` boxes, as one number.
+
+    The pairwise table above pairs a whole plate at once; this is the single-pair question - is
+    the box the plan measured the same face as this box some later detection returned - and that
+    needs a score to rank candidates by. Zero area on either side, or no overlap at all, scores
+    ``0.0`` instead of raising: a box with no area overlaps nothing.
+    """
+    ax1, ay1, ax2, ay2 = (float(v) for v in a)
+    bx1, by1, bx2, by2 = (float(v) for v in b)
+    inter = (max(0.0, min(ax2, bx2) - max(ax1, bx1))
+             * max(0.0, min(ay2, by2) - max(ay1, by1)))
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def left_to_right_face_order(boxes) -> list[int]:
+    """Face indices counted left to right, as the pairing preview and Pick faces number them.
+
+    Mirrors the released tracker's own ``left_most`` ranking (nodes.py:866): centre x first, ties
+    settled on the box corner, so two faces at the same height never swap numbers. The tracker
+    scores ``left_most`` as ``-centre_x`` and sorts on the negated score, which lands on ascending
+    centre x - the same order, spelled out here rather than doubled-negated.
+
+    This is deliberately NOT the seed ordering ``build_subject_plan`` uses, and merging the two
+    would be a behaviour change, not a tidy-up: that one orders subject SEEDS - which plate a head
+    came from counts, so it breaks a centre-x tie on centre y and then on kind and index - while
+    this one orders the boxes found on ONE frame and answers the face NUMBER that a shot lock and
+    a narrowed pick ask for. Two questions, two orders, both left-to-right.
+    """
+    return sorted(
+        range(len(boxes)),
+        key=lambda k: ((float(boxes[k][0]) + float(boxes[k][2])) / 2.0,
+                       float(boxes[k][0]), float(boxes[k][1])))
+
+
 # ----------------------------------------------------------------------------
 # pairing: positional, measured on both plates at the match frame
 # ----------------------------------------------------------------------------
@@ -403,13 +443,9 @@ def overlapping_subject_pairs(plan, threshold: float = DEFAULT_OVERLAP_THRESHOLD
             index_b, rect_b = rects[j]
             if rect_a is None or rect_b is None:
                 continue
-            box_a = np.array([[rect_a[0], rect_a[1], rect_a[0] + rect_a[2], rect_a[1] + rect_a[3]]])
-            box_b = np.array([[rect_b[0], rect_b[1], rect_b[0] + rect_b[2], rect_b[1] + rect_b[3]]])
-            shared = float(_overlap_area(box_a, box_b)[0][0])
-            union = (rect_a[2] * rect_a[3]) + (rect_b[2] * rect_b[3]) - shared
-            if union <= 0.0:
-                continue
-            overlap = shared / union
+            box_a = (rect_a[0], rect_a[1], rect_a[0] + rect_a[2], rect_a[1] + rect_a[3])
+            box_b = (rect_b[0], rect_b[1], rect_b[0] + rect_b[2], rect_b[1] + rect_b[3])
+            overlap = box_iou(box_a, box_b)
             if overlap > limit:
                 pairs.append({"a": index_a, "b": index_b, "overlap": float(overlap),
                               "rect_a": [float(v) for v in rect_a],
