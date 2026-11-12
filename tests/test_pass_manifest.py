@@ -170,3 +170,40 @@ def test_the_fingerprint_names_every_pairing_input_that_differs(tmp_path):
     repaired["subjects"][0]["still_face"] = None
     assert any("subject" in line for line in ps.fingerprint_difference(_built_plan(),
                                                                       repaired))
+
+
+def test_the_crop_positions_round_trip_with_the_tracker_s_shapes_back(tmp_path):
+    """`crops.json` is readable JSON that a resumed pass can stitch from - including the
+    tuples the tracker built, which JSON would otherwise turn back into lists."""
+    job = str(tmp_path / "job")
+    transform = {
+        "boxes": [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+        "canvas": (768, 768),
+        "src_size": (1000, 1000),
+        "frames": np.int64(2),
+        "source": [0, 2],
+        "source_frames": 3,
+        "segments": [(0, 1), (1, 2)],
+        "absent": [False, True],
+        "weights": [np.float64(1.0), 0.0],
+        "detected": [True, False],
+        "face_rect": [(1.5, 2.5, 3.5, 4.5), (0.0, 0.0, 1.0, 1.0)],
+        "crop_factor": np.float64(2.5),
+    }
+    path = ps.write_positions(job, 4, transform)
+    assert path == ps.positions_path(job, 4)
+
+    back = ps.read_positions(job, 4)
+    assert back["canvas"] == (768, 768)
+    assert back["src_size"] == (1000, 1000)
+    assert back["segments"] == [(0, 1), (1, 2)]
+    assert back["face_rect"] == [(1.5, 2.5, 3.5, 4.5), (0.0, 0.0, 1.0, 1.0)]
+    assert back["frames"] == 2
+    assert back["boxes"] == [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]
+    assert back["weights"] == [1.0, 0.0]
+    assert back["absent"] == [False, True]
+    assert back["crop_factor"] == 2.5
+
+    with pytest.raises(FileNotFoundError) as exc:
+        ps.read_positions(job, 9)
+    assert ps.positions_path(job, 9) in str(exc.value)

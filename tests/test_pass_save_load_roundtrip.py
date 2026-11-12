@@ -48,6 +48,8 @@ def _transform(count: int = FRAMES):
         "absent": [i == count - 1 for i in range(count)],
         "weights": [1.0, 0.5, 1.0, 0.25][:count],
         "detected": [True, True, True, False][:count],
+        "face_rect": [(1.0 + i, 2.0, 3.0, 4.0) for i in range(count)],
+        "crop_factor": 2.5,
     }
 
 
@@ -88,6 +90,8 @@ def test_a_saved_crops_pass_loads_back_as_the_same_frames_in_the_same_order(pack
     assert positions["weights"] == [1.0, 0.5, 1.0, 0.25]
     assert positions["detected"] == [True, True, True, False]
     assert positions["source"] == list(range(FRAMES))
+    assert positions["face_rect"] == transform["face_rect"]   # the stitch node's paste rects
+    assert positions["crop_factor"] == 2.5
     assert str(folder) in load_report
 
 

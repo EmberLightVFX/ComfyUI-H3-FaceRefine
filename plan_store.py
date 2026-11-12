@@ -824,7 +824,9 @@ def check_manifest_subjects(plan, job_dir) -> list[int]:
 # one the tracker built.
 
 _TUPLE_FIELDS = ("canvas", "src_size")
-_PAIR_LIST_FIELDS = ("segments",)
+# Per-frame lists whose entries were tuples when the tracker built them. Restored by arity:
+# `segments` is (start, end) in whole frames, `face_rect` is a float rect in canvas pixels.
+_TUPLE_ENTRY_FIELDS = {"segments": (2, int), "face_rect": (4, float)}
 
 
 def write_positions(job_dir, subject, transform) -> str:
@@ -867,10 +869,11 @@ def read_positions(job_dir, subject) -> dict:
         value = payload.get(field)
         if isinstance(value, (list, tuple)) and len(value) == 2:
             payload[field] = (int(value[0]), int(value[1]))
-    for field in _PAIR_LIST_FIELDS:
+    for field, (arity, cast) in _TUPLE_ENTRY_FIELDS.items():
         value = payload.get(field)
         if isinstance(value, list):
-            payload[field] = [tuple(int(v) for v in part) for part in value]
+            payload[field] = [tuple(cast(v) for v in part) for part in value
+                              if isinstance(part, (list, tuple)) and len(part) == arity]
     return payload
 
 
