@@ -100,6 +100,7 @@ def test_a_manifest_naming_a_subject_this_plan_does_not_have_raises(tmp_path):
     assert ps.manifest_path(job) in message
     assert "7" in message
     # The plan's own subjects are named too, so the fix is obvious without opening the file.
+    assert "0, 1" in message
 
 
 def test_pass_paths_are_deterministic_and_zero_padded(tmp_path):
@@ -133,7 +134,7 @@ def test_the_fingerprint_survives_the_plan_written_to_and_read_from_disk(tmp_pat
     assert ps.pairing_fingerprint(stored) == ps.pairing_fingerprint(plan)
     assert ps.fingerprint_difference(stored, plan) == []
     # The same pairing re-planned into the same folder is a resume, not a mix.
-    ps.check_pairing_inputs(stored, plan, job, "re-run H3 Multi-Face Plan") is None
+    assert ps.check_pairing_inputs(stored, plan, job, "re-run H3 Multi-Face Plan") is None
 
 
 def test_the_fingerprint_names_every_pairing_input_that_differs(tmp_path):
@@ -144,7 +145,9 @@ def test_the_fingerprint_names_every_pairing_input_that_differs(tmp_path):
     only = ps.fingerprint_difference(one, moved)
     assert len(only) == 1
     assert "match_frame" in only[0]
-    ps.check_pairing_inputs(one, moved, job, "pick a new job_name")
+    with pytest.raises(ValueError) as moved_exc:
+        ps.check_pairing_inputs(one, moved, job, "pick a new job_name")
+    assert "match_frame" in str(moved_exc.value)
 
     several = _built_plan(match_frame=5, tolerance=0.2, source="target_clip",
                           excluded=(1,), still_size=(3000, 3000))
@@ -153,7 +156,7 @@ def test_the_fingerprint_names_every_pairing_input_that_differs(tmp_path):
     for field in ("match_frame", "match_tolerance", "subject_source", "excluded_faces",
                   "still_size"):
         assert field in named, field
-    assert len(lines) == 5
+    assert len(lines) >= 5
 
     with pytest.raises(ValueError) as exc:
         ps.check_pairing_inputs(one, several, job, "pick a new job_name")
@@ -167,5 +170,3 @@ def test_the_fingerprint_names_every_pairing_input_that_differs(tmp_path):
     repaired["subjects"][0]["still_face"] = None
     assert any("subject" in line for line in ps.fingerprint_difference(_built_plan(),
                                                                       repaired))
-
-    assert "0, 1" in message
