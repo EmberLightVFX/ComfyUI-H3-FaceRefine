@@ -205,10 +205,14 @@ def test_the_pass_nodes_reuse_the_released_types_rather_than_inventing_new_ones(
 def test_the_pass_save_inputs_and_widgets_are_in_this_exact_order():
     schema = m.H3PassSave.INPUT_TYPES()
     assert list(schema["required"]) == ["plan"] + PASS_SAVE_ORDER
-    assert list(schema["optional"]) == ["transform"]
+    # chained_from is APPENDED after transform: ComfyUI replays saved graphs by position
+    # (ADR 0002), so a new optional widget goes at the end of the optional block.
+    assert list(schema["optional"]) == ["transform", "chained_from"]
     assert schema["required"]["plan"][0] == m.H3FACEPLAN
     assert schema["required"]["images"][0] == "IMAGE"
     assert schema["optional"]["transform"][0] == "H3FACEXFORM"
+    assert schema["optional"]["chained_from"][0] == "INT"
+    assert schema["optional"]["chained_from"][1]["default"] == ps.CHAINED_TO_CLIP == -1
     assert schema["required"]["subject"][0] == "INT"
     assert list(schema["required"]["stage"][0]) == list(ps.PASS_STAGES)
     assert schema["required"]["stage"][1]["default"] == "crops"

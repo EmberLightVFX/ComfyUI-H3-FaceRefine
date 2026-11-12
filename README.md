@@ -1265,6 +1265,7 @@ finished. The asymmetry is deliberate — crops are cheap to keep and worthless 
 | `stage` | `crops` | Which half of the pass is being checkpointed. `crops` writes the crops H3 was fed plus their positions, and does **not** finish a subject. `stitched` writes the frames composited back onto the clip; recording it is what completes the pass and lets the job resume past them. |
 | `images` | - | The crop batch for `stage=crops`, the stitched frames for `stage=stitched`. Written in frame order as `frame_0000.png` onward through the same PNG writer as the subject references, so you can open them and see exactly what H3 was given. The names never change: re-running a pass overwrites its own frames instead of leaving a second copy nobody can line up with frame 7. The batch has to be float 0-1 — a `uint8` batch is refused with a convert-it message rather than written back as noise. |
 | `transform` *(opt)* | - | The crop positions from **H3 Face Track + Crop**. **Required for `stage=crops`** — without them the crops cannot be put back where they were cut. For `stage=stitched` there is nothing new to record, so leave it unwired: a subject's positions belong to its crops stage, and rewriting them from a stitched pass would put those frames back somewhere other than where they were cut. The report says which of the two happened. |
+| `chained_from` *(opt)* | `-1` | **Which plate this pass was composited onto.** `-1` is the target clip; any other number is the subject whose stitched result this pass was composited onto. The first pass in the plan's order leaves it at `-1`; every later pass names the subject before it — subject 1 says `0`, subject 2 says `1`. [H3 Multi-Face Composite](#h3-multi-face-composite) returns the last subject's stitched frames on the claim that every earlier pass is already carried inside them, and that is only true if the passes were chained this way — which no node can see from the graph, so it is declared here, recorded in the pass manifest, and checked there. Wire every pass onto the target clip and each pass throws the previous subject's work away: the composite refuses rather than returning a clip with one refined face in it and calling it the chain. |
 
 **Outputs:** `images` (the batch, unchanged, so the node can sit mid-chain), `report`,
 `subject_index`, `pass_complete` (`1` once `stitched` is recorded). It is an output node, so the
@@ -1279,6 +1280,7 @@ images: <output>/shot 07/passes/subject_0000/crops
 crop positions: <output>/shot 07/passes/subject_0000/crops.json
 pass NOT complete yet: a subject only counts as done once its stitched stage is recorded, so a half-finished pass is resumed, not skipped
 manifest: <output>/shot 07/manifest.json
+chained onto    the target clip
 shots           subject 0 was lost in shot 1 (frames 0-3): 1 of 4 frame(s) (frames 3-3) produced nobody - the tracker reached this shot with this subject selected and produced nobody for those frames - their identity fell below the threshold, or the face was never detected; check identity_track and identity_threshold, or lower confidence, on H3 Face Track + Crop
 next subject still up: 0   H3 Subject Select's next takes it, and this subject again until its stitched stage is recorded
 ```
@@ -1331,19 +1333,36 @@ short batch that quietly resizes the job.
 The end of the job: the **composited clip**, plus the proof that every subject is actually in it.
 
 **It re-blends nothing, deliberately.** Each pass was feathered once by **H3 Face Stitch**, and each
-pass composited onto the previous pass's result — so the last subject's stitched frames already
-contain every earlier pass. This node picks those frames up off disk. There is no `base_images` and
-no `transform` on it because a second feather laid over a feathered edge is how a freshly refined
-face goes soft, which is the one thing this feature must not do to work that is already good.
+pass was meant to be composited onto the previous pass's result — so the last subject's stitched
+frames already contain every earlier pass. This node picks those frames up off disk. There is no
+`base_images` and no `transform` on it because a second feather laid over a feathered edge is how a
+freshly refined face goes soft, which is the one thing this feature must not do to work that is
+already good.
+
+**The chain is an intent the passes declare, not a fact this node can see.** Which `base_images`
+each stitch node was wired to lives in your graph, and nothing here can read it. So each pass
+declares it — [`chained_from` on H3 Pass Save](#h3-pass-save), recorded in the **pass manifest** —
+and the composite walks the plan order against those declarations:
+
+- every pass declared its base and they match the plan's order → the report says so, and returning
+  the last subject's frames is honest;
+- a pass declared something that contradicts the plan's order (say every pass onto the target clip)
+  → it **refuses, naming the subject**: that arrangement drops every earlier subject out of the
+  finished clip while the report still lists them;
+- an older job folder recorded nothing → it **warns** and names which subjects it cannot vouch
+  for, because the passes may well be chained; nothing on disk says so.
 
 ### The chaining recipe
 
 Said once, because it is the whole arrangement:
 
-- subject 0's **H3 Face Stitch** takes the **target clip** as its `base_images`;
+- subject 0's **H3 Face Stitch** takes the **target clip** as its `base_images`, and its
+  **H3 Pass Save** leaves `chained_from` at `-1`;
 - subject 1's takes **H3 Pass Load** with `stream = stitched`, `subject = 0`, wired into that stitch
-  node's `base_images`; subject 2's takes subject 1's, and so on down the plan;
-- **H3 Multi-Face Composite** returns the last subject's stitched frames as the finished clip.
+  node's `base_images`, and its **H3 Pass Save** sets `chained_from` to `0`; subject 2's takes
+  subject 1's and sets `1`, and so on down the plan;
+- **H3 Multi-Face Composite** returns the last subject's stitched frames as the finished clip,
+  having checked that every pass said the same thing.
 
 **Composite order is plan order** — subjects numbered left to right at the match frame — and it is
 deliberately **not a widget**. A widget would let the order drift away from the numbering the
@@ -1386,10 +1405,11 @@ A finished two-subject job:
 ```
 job folder: <output>/shot 07
 order: subject 0 -> subject 1   plan order = left to right at match frame 2
-chained: each pass composited onto the previous pass's stitched result and the first onto the target clip. Nothing is blended here: H3 Face Stitch feathered each pass once, and feathering a feathered edge again softens the work
+chain as declared by H3 Pass Save: subject 0 onto the target clip; subject 1 onto subject 0
+every pass named the plate it was composited onto, so the last subject's stitched frames carry the earlier passes into the finished clip because each pass took the previous one's result as its base - nothing is re-blended here
 subject 0   stitched 4 frame(s) at 1000x1000px   <output>/shot 07/passes/subject_0000/stitched
 subject 1   stitched 4 frame(s) at 1000x1000px   <output>/shot 07/passes/subject_0001/stitched
-final result: subject 1's stitched frames   those 4 frame(s) already carry subject 0 composited into them
+final result: subject 1's stitched frames   this node hands back those 4 frame(s) and blends nothing: they carry subject 0 in them only if each of those passes was composited onto the one before it, which the chain line above says - or says nobody declared
 no overlapping subject crop regions at match frame 2 (threshold 0.25)
 audio: the finished clip carries the target clip's audio. Each pass's generated audio was discarded - these nodes only ever carry image batches, so wire the target clip's own audio into your save node.
 ```

@@ -923,6 +923,49 @@ def plan_version_note(plan) -> str:
     return ""
 
 
+def chain_lines(check) -> list:
+    """The composite's chain sentence, in the voice of what was actually recorded.
+
+    Never a flat statement that the passes WERE chained: it names which passes declared their
+    base, and where nothing was declared it says the claim is unproven rather than hiding it.
+    """
+    check = check or {}
+    declared = check.get("declared") or {}
+    missing = check.get("missing") or []
+    lines = ["chain as declared by H3 Pass Save: "
+             + "; ".join(f"subject {index} onto {chain_label(value)}"
+                         for index, value in sorted(declared.items()))]
+    if missing:
+        named = ", ".join(f"subject {index}" for index in missing)
+        lines.append(
+            f"{named} recorded no chained_from, so nothing in this job folder says what those "
+            f"passes were composited onto: the last stitched pass being the finished clip is "
+            f"unproven for them. Re-save those stages with chained_from set, or check the "
+            f"stitched folders yourself.")
+    else:
+        lines.append("every pass named the plate it was composited onto, so the last subject's "
+                     "stitched frames carry the earlier passes into the finished clip because "
+                     "each pass took the previous one's result as its base - nothing is "
+                     "re-blended here.")
+    return lines
+
+
+def chain_error(check) -> str:
+    """The refusal sentence for a declared base that contradicts the plan order."""
+    parts = []
+    for index, declared_value, expected in (check or {}).get("wrong") or []:
+        parts.append(
+            f"subject {index} declared chained_from {declared_value} (it composited onto "
+            f"{chain_label(declared_value)}), but this plan composites it onto "
+            f"{chain_label(expected)}. Wiring a pass onto the target clip instead of the previous "
+            f"pass's result drops every earlier subject from the finished clip: their refined "
+            f"faces revert to the pixels the clip arrived with, and the report would still name "
+            f"them. Set chained_from on H3 Pass Save to the subject whose stitched result that "
+            f"pass was composited onto - {expected} for this one - and re-save its stitched "
+            f"stage.")
+    return " ".join(parts)
+
+
 def write_plan(job_dir, plan: dict) -> str:
     """Write the subject plan into the job folder, making the folder if need be.
 
@@ -1226,6 +1269,80 @@ def pass_is_complete(job_dir, subject) -> bool:
 def plan_subject_indices(plan) -> list[int]:
     """The subject numbers this plan actually has."""
     return [int(subject["index"]) for subject in (plan or {}).get("subjects") or []]
+
+
+# What H3 Pass Save's `chained_from` widget means: -1 is the target clip, any other number is the
+# subject whose stitched result that pass was composited onto.
+CHAINED_TO_CLIP = -1
+
+
+def chain_check(plan, job_dir) -> dict:
+    """What each pass DECLARED it composited onto, against the plan's own composite order.
+
+    **H3 Multi-Face Composite** hands back the last subject's stitched frames on the claim that
+    every earlier pass is already carried inside them, because each pass took the previous pass's
+    result as its base. Nothing in the graph proves that - the wiring is the user's - so H3 Pass
+    Save records what each pass said it composited onto, and the composite checks that against the
+    plan order it prints. A pass that says the target clip when the plan says "after subject 0"
+    silently reverts subject 0 in the finished clip while the report claims a chain, so that is a
+    refusal and not a note.
+
+    Returns ``{"declared": {subject: value}, "missing": [subject, ...],
+    "wrong": [(subject, declared, expected), ...]}``.
+
+    A missing declaration only counts against a subject that is not first in the order: the first
+    pass sits on the target clip by definition - which is also what the widget's default says - so
+    a job folder written before the field existed is silent exactly where silence is harmless.
+    """
+    order = plan_subject_indices(plan)
+    declared, missing, wrong = {}, [], []
+    for position, index in enumerate(order):
+        record = manifest_stage_record(job_dir, index, "stitched")
+        value = (record or {}).get("chained_from") if isinstance(record, dict) else None
+        expected = CHAINED_TO_CLIP if position == 0 else order[position - 1]
+        if value is None:
+            if position:
+                missing.append(index)
+            continue
+        declared[index] = int(value)
+        if int(value) != int(expected):
+            wrong.append((index, int(value), int(expected)))
+    return {"declared": declared, "missing": missing, "wrong": wrong}
+
+
+def checked_chained_from(plan, subject, value) -> int:
+    """A ``chained_from`` declaration that means something for THIS plan.
+
+    -1 (the target clip) or one of the plan's own subjects, and never the subject itself: a pass
+    composited onto its own earlier output is not a chain, it is a loop nobody meant.
+    """
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"chained_from must be -1 (the target clip) or a subject number, got {value!r}"
+        ) from None
+    if index == CHAINED_TO_CLIP:
+        return CHAINED_TO_CLIP
+    if index < CHAINED_TO_CLIP:
+        raise ValueError(
+            f"chained_from {index} means nothing: -1 is the target clip and every other value is "
+            f"a subject number.")
+    if index == _subject_index(subject):
+        raise ValueError(
+            f"chained_from {index} is subject {index} itself. A pass cannot composite onto its "
+            f"own output: name the subject whose stitched result it was composited onto, or -1 "
+            f"for the target clip.")
+    if index not in plan_subject_indices(plan):
+        raise ValueError(
+            f"chained_from {index} is not a subject of this plan. The subjects are "
+            f"{', '.join(str(i) for i in plan_subject_indices(plan))}, or -1 for the target clip.")
+    return index
+
+
+def chain_label(value) -> str:
+    """A chained_from value in words: which plate that pass was composited onto."""
+    return "the target clip" if int(value) == CHAINED_TO_CLIP else f"subject {int(value)}"
 
 
 def check_manifest_subjects(plan, job_dir) -> list[int]:

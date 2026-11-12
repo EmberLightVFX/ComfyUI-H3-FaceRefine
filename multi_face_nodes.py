@@ -1157,6 +1157,16 @@ def checked_subject(plan, choice) -> int:
     return index
 
 
+def _expected_chain_base(plan, index):
+    """What THIS plan's order says subject `index` composites onto: the target clip for the first
+    subject, the previous subject for every later one. The composite checks the same rule from the
+    manifest, so both ends of the chain quote one answer (ADR 0006)."""
+    order = plan_store.plan_subject_indices(plan)
+    if index not in order or order.index(index) == 0:
+        return plan_store.CHAINED_TO_CLIP
+    return order[order.index(index) - 1]
+
+
 def checked_image_batch(images, label: str) -> tuple[int, int, int]:
     """An IMAGE batch, as (frames, width, height) - float 0-1, or say so plainly."""
     if images is None or int(images.dim()) != 4:
@@ -1243,6 +1253,27 @@ class H3PassSave:
                                "stage=crops - without them the crops cannot be put back where "
                                "they were cut. For stage=stitched there is nothing new to "
                                "record, so leave it unwired."}),
+                # chained_from (#11 review) is appended AFTER transform for the same reason the
+                # required widgets are appended at the end: ComfyUI replays saved graphs by
+                # position (ADR 0002), so nothing that already existed moves.
+                "chained_from": ("INT", {
+                    "default": plan_store.CHAINED_TO_CLIP,
+                    "min": plan_store.CHAINED_TO_CLIP, "max": MAX_SUBJECT_CHOICES - 1, "step": 1,
+                    "tooltip": "Which plate THIS pass was composited onto: -1 means the target "
+                               "clip; any other number is the subject whose stitched result this "
+                               "pass was composited onto.\n\n"
+                               "H3 Multi-Face Composite returns the LAST subject's stitched "
+                               "frames on the claim that every earlier pass is already carried "
+                               "inside them. That is only true if each pass was composited onto "
+                               "the previous pass's result, which no node in the graph can see - "
+                               "so it is declared here and checked there.\n\n"
+                               "For the first pass in the plan's order, leave it at -1. For every "
+                               "later pass, set it to the subject before it: subject 1 says 0, "
+                               "subject 2 says 1. Wire every pass onto the target clip instead "
+                               "and each pass throws the previous subject's work away, so the "
+                               "finished clip ends up with exactly one refined face in it. The "
+                               "composite refuses when what is declared here contradicts the "
+                               "plan's order."}),
             },
         }
 
@@ -1254,7 +1285,8 @@ class H3PassSave:
     OUTPUT_NODE = True
     CATEGORY = CATEGORY
 
-    def run(self, plan, subject, stage, images, transform=None):
+    def run(self, plan, subject, stage, images, transform=None,
+            chained_from=plan_store.CHAINED_TO_CLIP):
         plan = checked_plan(plan)
         job = job_folder_for_plan(plan, "H3 Pass Save")
         # Refuse before two pairings mix: the plan in the graph against the plan.json already
@@ -1265,6 +1297,10 @@ class H3PassSave:
         index = checked_subject(plan, subject)
         name = plan_store.checked_stage(stage)
         count, width, height = checked_image_batch(images, "images")
+        # #11 review: this is the node that knows what it was composited onto, so this is where
+        # the chain is DECLARED. H3 Multi-Face Composite reads it back and refuses if it
+        # contradicts the plan's own order, instead of asserting the chain it cannot see.
+        base = plan_store.checked_chained_from(plan, index, chained_from)
 
         files = plan_store.stage_files(job, index, name, count)
         os.makedirs(os.path.dirname(files[0]), exist_ok=True)
@@ -1274,7 +1310,10 @@ class H3PassSave:
 
         written = {"frames": count, "width": width, "height": height,
                    "first": os.path.basename(files[0]),
-                   "last": os.path.basename(files[-1])}
+                   "last": os.path.basename(files[-1]),
+                   # The declared chain, recorded with the stage it describes so the composite
+                   # can check the claim against the plan order instead of asserting it.
+                   "chained_from": base}
         note = ""
         if name == "crops":
             if transform is None:
@@ -1297,6 +1336,14 @@ class H3PassSave:
         plan_store.record_pass_stage(job, index, name, written)
         complete = 1 if plan_store.pass_is_complete(job, index) else 0
         lines = _checkpoint_report_lines(job, index, name, written, complete, note)
+        # The declared chain, echoed back so a wrong widget is visible at the node that took it
+        # and not only at the composite that refuses on it 20 minutes of generation later.
+        expected = plan_store.chain_label(_expected_chain_base(plan, index))
+        lines.append(_line("chained onto", plan_store.chain_label(base))
+                     + ("" if base == expected else
+                        f"   NOTE: this plan composites subject {index} onto {expected}, so H3 "
+                        f"Multi-Face Composite will refuse on that unless the passes really were "
+                        f"chained differently"))
         # #6: the shot account, now measured against what this pass actually produced. Derived
         # from the payload already wired - the tracker's transform for stage=crops, otherwise the
         # crops.json this pass checkpointed earlier - so no widget is added and no saved graph
@@ -1508,6 +1555,15 @@ class H3MultiFaceComposite:
                 "this plan has no subjects, so there is nothing to composite: H3 Multi-Face Plan "
                 f"found no faces, or every face was excluded. Sort the plan in {job} out first.")
 
+        # #11 review: what each pass was composited onto is an INTENT the pass declares on H3 Pass
+        # Save, not a fact this node can see - the wiring lives in the user's graph. A pass wired
+        # onto the target clip instead of the previous pass's result silently drops every earlier
+        # subject from the finished clip, so a declaration that contradicts the plan's own order
+        # is refused here instead of being reported afterwards as though it had been honoured.
+        chain = plan_store.chain_check(plan, job)
+        if chain["wrong"]:
+            raise ValueError(f"H3 Multi-Face Composite refuses: {plan_store.chain_error(chain)}")
+
         stage = "stitched"   # the stage that completes a pass, and the only one that is composited
         recorded = {}
         absent = []
@@ -1573,10 +1629,11 @@ class H3MultiFaceComposite:
         warnings = plan_store.overlapping_subject_pairs(plan, overlap_threshold)
         frame = (plan or {}).get("match_frame")
         lines = [f"job folder: {job}",
-                 f"order: {_order_line(order)}   plan order = left to right at match frame {frame}",
-                 f"chained: each pass composited onto the previous pass's stitched result and the "
-                 f"first onto the target clip. Nothing is blended here: H3 Face Stitch feathered "
-                 f"each pass once, and feathering a feathered edge again softens the work"]
+                 f"order: {_order_line(order)}   plan order = left to right at match frame {frame}"]
+        # The chain in the voice of what was actually recorded: what each pass DECLARED it was
+        # composited onto on H3 Pass Save, or the gap where a pass declared nothing. This node
+        # cannot see the graph's wiring, so it never says the passes were chained on its own.
+        lines.extend(plan_store.chain_lines(chain))
         for index in order:
             entry = recorded[index]
             size = (f"{int(entry['width'])}x{int(entry['height'])}px"
@@ -1585,8 +1642,10 @@ class H3MultiFaceComposite:
                          f"{plan_store.stage_dir(job, index, stage)}")
         if len(order) > 1:
             carried = ", ".join(f"subject {i}" for i in order[:-1])
-            lines.append(f"final result: subject {final}'s stitched frames   those {frames} "
-                         f"frame(s) already carry {carried} composited into them")
+            lines.append(f"final result: subject {final}'s stitched frames   this node hands back "
+                         f"those {frames} frame(s) and blends nothing: they carry {carried} in "
+                         f"them only if each of those passes was composited onto the one before "
+                         f"it, which the chain line above says - or says nobody declared")
         else:
             lines.append(f"final result: subject {final}'s stitched frames   this job has one "
                          f"pass, so those {frames} frame(s) are it on the target clip")
