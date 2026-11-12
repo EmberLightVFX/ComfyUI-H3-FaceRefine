@@ -1418,12 +1418,15 @@ SHOT_ABSENT_PLANNED = "absent_planned"
 SHOT_LOST = "lost"
 
 # The two ways a report can end. Deliberately different: one tells the user nothing is wrong,
-# the other names the widgets that would fix it.
+# the other names the widgets that would fix it. The lost half used to restate the diagnosis
+# before the fix ("the tracker stopped finding them there"), which made the sentence three
+# clauses long beside an absence line that is two - and the state is already carried by the
+# `state` field and by the words "was lost", so the fix is all that is left to say.
 ABSENT_ACTION = ("original pixels are kept there, which is the intended result for an absence - "
                  "if this person IS in this shot, plan on a match frame they share with the "
                  "reference still, or name them with Pick faces")
-LOST_ACTION = ("the tracker stopped finding them there - check identity_track and "
-               "identity_threshold, or lower confidence, on H3 Face Track + Crop")
+LOST_ACTION = ("check identity_track and identity_threshold, or lower confidence, "
+               "on H3 Face Track + Crop")
 
 # A subject with no subject reference (#8) is absent in a different way again: the pass never
 # had a picture of them. Telling them to fix a pairing would send them back to a decision the
@@ -1547,20 +1550,21 @@ def _lost_reason(pick, lost_frames) -> str:
 
     A lost subject has two causes and the user fixes them differently, so the pick payload's
     boxes are read: a shot that never held as many faces as this subject's NUMBER had nobody to
-    detect there, while a shot that held plenty of faces lost this subject's identity.
+    detect there, while a shot that held plenty of faces lost this subject's identity. One clause
+    each - the sentence these feed is read while a job is being debugged, and it has a fix to
+    state as well.
     """
     boxes = (pick or {}).get("boxes") or []
     if not boxes:
-        return ("the tracker reached this shot with this subject selected and produced no "
-                "subject for those frames - their identity fell below the threshold, or the "
-                "face was never detected")
+        return ("the tracker reached this shot with this subject selected and produced nobody "
+                "for those frames - their identity fell below the threshold, or the face was "
+                "never detected")
     number = int((pick or {}).get("select_index", 0) or 0)
     widest = max((len(boxes[f]) for f in lost_frames if 0 <= f < len(boxes)), default=0)
     if widest <= number:
-        return (f"no face was detected in this shot at this subject's position - the detector "
-                f"reported at most {widest} face(s) there, so there was nobody to track")
-    return ("faces were detected in this shot but none of them matched this subject - their "
-            "identity fell below the threshold")
+        return (f"no face was detected in this shot at this subject's position, the detector "
+                f"reporting at most {widest} face(s) there, so there was nobody to track")
+    return ("faces were detected in this shot but none of them matched this subject's identity")
 
 
 def _absent_reason(entry, pick, shot_number: int, dropped: int) -> str:
@@ -1690,7 +1694,7 @@ def absence_lines(shots, subject) -> list:
                        if (shot["lost_start"], shot["lost_end"]) != (shot["start"], shot["end"])
                        else ""))
             lines.append(f"subject {index} was lost in {where}: {span} produced nobody - "
-                         f"{shot['reason']} - {LOST_ACTION}")
+                         f"{shot['reason']}; {LOST_ACTION}")
         elif shot["frames_absent"] or shot["frames_dropped"]:
             lines.append(f"subject {index} is partly absent inside {where}: {shot['reason']} - "
                          f"{shot['action']}")
