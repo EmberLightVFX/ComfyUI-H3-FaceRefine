@@ -37,6 +37,65 @@ or the refined face boils.
 
 ---
 
+## What's new in 1.2.0
+
+**Several people in one clip is now one job, not a stack of copies of the graph.** Five nodes run a
+multi-face clip as one **pass** per subject — the released pipeline repeated, once per person, with
+the bookkeeping in a **job folder** instead of in your clipboard:
+[H3 Multi-Face Plan](#h3-multi-face-plan) decides who the subjects are and cuts each one's
+**subject reference** out of the **reference still**, [H3 Subject Select](#h3-subject-select) hands
+one subject to the released tracker, [H3 Pass Save](#h3-pass-save) and
+[H3 Pass Load](#h3-pass-load) checkpoint each pass, and
+[H3 Multi-Face Composite](#h3-multi-face-composite) refuses until every subject has landed.
+The seven nodes already in the pack are byte-for-byte unchanged; a single-subject graph loads and
+behaves exactly as it did (ADR 0002).
+
+**The cost, stated up front: one generation per subject.** A job with three subjects costs three
+H3 renders of the whole clip, not one. The plan node prints that number before you queue —
+`2 subject(s) x 4 frame(s) @ 768x768 = 8 frame(s) to generate` — so the cost is a decision you make
+looking at the graph, not a surprise an hour in.
+
+**Why one pass per subject:** H3's conditioning is **whole-frame**, not per face. A subject
+reference does not travel with the face it came from; it conditions the whole generated frame.
+Hand H3 two subject references at once, or generate both people in one render, and the reference
+for one face gets applied to whoever is nearest it — a face that shares a frame with another
+inherits the other person's features. So each pass carries exactly one subject's picture, and the
+several passes are recombined in the clip rather than in the latent. See
+[docs/adr/0001](docs/adr/0001-one-generation-per-subject.md).
+
+**Composite order is the plan's order, and it is deliberately not a widget.** Subjects are
+numbered left to right at the **match frame**, and passes are composited in that order. A widget
+would let the order drift from the numbering the reports and the **pairing preview** use, and then
+"subject 1" would mean two different things in one job. What each pass composites onto is the
+previous pass's result, so the last subject's stitched frames *are* the finished clip — see
+[The chaining recipe](#h3-multi-face-composite).
+
+**A job resumes where it stopped, and knows which subject that was.** Every pass writes its stages
+into `<output>/<job_name>/`; `manifest.json` is the **pass manifest**, and `next` on H3 Subject
+Select is the resume cursor. A subject only counts as done once its `stitched` stage is recorded —
+a pass that died after the crops is re-run, not skipped.
+
+**A face that never pairs gets an explicit answer.** `unmatched_faces` on the plan node chooses
+between leaving it alone, refining it with no reference, or conditioning it on the whole reference
+still. The default is `leave`, and the report says out loud that leaving is not a failure — see
+[unmatched_faces](#h3-multi-face-plan).
+
+**The pairing is checkable before anything is queued.** The plan node now draws both plates with
+every face numbered (`pairing_preview.png` in the job folder) and carries a read-only panel that
+shows that pairing and each subject's reference. A bad pairing costs N renders, so it has to be
+visible at the node that made it — see [the pairing preview panel](#h3-multi-face-plan).
+
+**Two pairings can never end up in one clip.** The plan node, both pass nodes and the composite
+compare the plan in the graph against the `plan.json` already in the job folder — the
+**pairing fingerprint** — and name every input that differs. This is the failure mode of
+run-per-subject workflows: a job folder holding passes cut from two different ideas of who is who
+produces a clip that quietly swaps faces, and it looks finished.
+
+A third template ships with this: **H3 Face Refine Multi Face**
+(`example_workflows/H3_Face_Refine_Multi_Face.json`), a two-subject job wired end to end.
+
+---
+
 ## What's new in 1.1.2
 
 **[H3 Face Track + Crop](#h3-face-track--crop) no longer jumps to another person when it loses the
@@ -228,20 +287,22 @@ It is read per request, so it takes effect as soon as ComfyUI restarts with it s
 
 ## Quick start
 
-Two example workflows are included, both annotated in-graph. They differ in **how the subject
-is chosen**; everything downstream is identical:
+Three example workflows are included, all annotated in-graph. The first two differ in **how the
+subject is chosen**; everything downstream is identical. The third runs that same chain once per
+**subject** for a clip with more than one person in it:
 
-| Template | Which face gets refined | Video loaded by |
-|---|---|---|
-| **H3 Face Refine Auto Select** | a ranking rule, `largest_face` as shipped | your own video loader |
-| **H3 Face Refine Manual Select** | you, in [Pick faces](#pick-faces), one per shot | `H3 Load Video + Face Select` |
+| Template | File | Which face gets refined | Video loaded by |
+|---|---|---|---|
+| **H3 Face Refine Auto Select** | `H3_Face_Refine_Auto_Select.json` | a ranking rule, `largest_face` as shipped | your own video loader |
+| **H3 Face Refine Manual Select** | `H3_Face_Refine_Manual_Select.json` | you, in [Pick faces](#pick-faces), one per shot | `H3 Load Video + Face Select` |
+| **H3 Face Refine Multi Face** | `H3_Face_Refine_Multi_Face.json` | the **subject plan**: every face the pairing finds, one **pass** each | `H3 Load Video + Face Select` |
 
-Both ship the SAM mask pair present but **muted**, so neither needs a SAM model to run. Unmute the
+The first two ship the SAM mask pair present but **muted**, so neither needs a SAM model to run. Unmute the
 pair to swap the rect paste mask for a face-shaped one, and drop `feather` to 4-8 when you do.
 Impact Pack itself is still needed either way — see [Requirements](#requirements) — because the
 templates' detector values use the model-folder naming its subpack registers.
 
-Both are installed as ComfyUI **workflow templates**. Open them from
+All three are installed as ComfyUI **workflow templates**. Open them from
 **Workflow → Browse Templates** once the pack is installed, no file hunting required.
 They also live in [`example_workflows/`](example_workflows) if you would rather load the JSON
 directly.
@@ -334,6 +395,78 @@ clean instead of at the sampler's current sigma — with no error to tell you.
 
 The `transform` output is the spine of the whole thing: it records where every crop came from, so
 the stitch can put each refined face back exactly where it belongs.
+
+### Multi Face — the plan picks the subjects
+
+`H3_Face_Refine_Multi_Face.json` is the Manual Select front end plus the plan: two subjects wired
+end to end, so the chaining is visible in the graph rather than left to be imagined.
+
+1. **Point `H3 Load Video + Face Select` at your clip** and set `cut_detection` to
+   `auto (pyscenedetect)` if the clip has hard cuts.
+2. **Load the reference still** into `Load Image`, and set `match_frame` on **H3 Multi-Face Plan**
+   to a frame every subject is clearly in — that one frame is where the pairing happens.
+3. **Run the plan node first, on its own.** Read the cost line and the pairing line, and open
+   `pairing_preview.png` or press **View pairing preview** to check who was paired with whom. A
+   wrong pairing costs one render per subject, so this is the cheapest moment to fix it.
+4. **Queue.** Pass A composites onto the target clip; Pass B composites onto Pass A, through Pass
+   Load. The composite at the end refuses if either pass never landed.
+5. **Interrupted?** Queue again with nothing changed: `subject = next` takes the first subject with
+   no completed **stitched** pass recorded in the job folder.
+
+The template says which model files it expects on a **Note node in the graph** (`Model files this
+template expects`) rather than burying them in this README, because they sit beside the loaders they
+describe — and it carries a second note on the job folder and the resume rule. Swap the filenames for
+what is in your models folder, and keep `steps` on both `BasicScheduler` nodes matching the turbo
+LoRA's step count.
+
+Use this when more than one face in the clip needs work. Accept the cost first: **N subjects is N
+renders of the whole clip.**
+
+### How it fits together with more than one subject
+
+The chain above is one **pass**. A multi-face job runs it once per **subject** and keeps the state
+in the **job folder** rather than in the graph:
+
+```
+FRONT END, once per job:
+  H3 Load Video + Face Select  -> images, audio, face_pick
+  images ─┬─ + reference_still ──► H3 Multi-Face Plan
+          │                             │ writes the job folder, and the plan
+          │                             │   plan.json · pairing_preview.png
+          │                             │   subject_0.png · subject_1.png …
+          │        plan ────────────┐   │
+          │            face_pick ─┐ │   │
+          ▼                       ▼ ▼   ▼
+  (per subject, in plan order)  H3 Subject Select  -> face_pick, subject_reference
+                                    │ narrowed pick
+                                    ▼
+                                H3 Face Track + Crop ── crops, transform ──► the released H3 chain
+                                    │            │                                    │ refined crops
+                                    │            └─► H3 Pass Save stage=crops ──► passes/subject_NNNN/
+                                    │                    (+ crops.json)                   crops/ …
+                                    ▼
+                                H3 Face Stitch Back
+                                    ▲ base_images = the previous pass's stitched frames
+                                    │              (the first pass takes the target clip)
+                                    ▼
+                                H3 Pass Save stage=stitched ──► passes/subject_NNNN/stitched/ …
+                                    │
+                          … queue again, `subject = next` moves to the next subject …
+
+  H3 Pass Load (subject = the one before, stream = stitched) ──► that stitch node's base_images
+
+  H3 Multi-Face Composite (plan, the target clip, overlap_threshold)
+        │ refuses unless every subject's stitched stage is in manifest.json
+        ▼
+  the composited clip  +  the target clip's audio  ──► save
+```
+
+Two things to hold onto. **The job folder is the pipeline's memory**: a queued pass re-reads the
+plan and the subject references from it, so nothing downstream needs the reference still loaded,
+and `manifest.json` is what makes an interrupted job resumable. **The graph is not a loop**: you
+queue the same graph again with `subject = next`, or you wire one branch per subject and chain them
+with Pass Load. ComfyUI has no way to iterate over a plan, which is why the chaining is explicit
+wiring and the counting is done by the manifest.
 
 ---
 
@@ -679,7 +812,11 @@ nothing — set it from that evidence rather than guessing.
 
 **Multiple people:** run the pipeline once per subject, each with that person's `identity_reference`
 and their own refs on the H3 node, then chain them, feeding run 1's stitched output in as run 2's
-`base_images`. The composites accumulate.
+`base_images`. The composites accumulate. Since 1.2.0 that bookkeeping has its own nodes —
+[H3 Multi-Face Plan](#h3-multi-face-plan) picks the subjects and
+[H3 Pass Load](#h3-pass-load) supplies the previous pass's stitched frames as the next pass's
+`base_images` — so the chaining is wired once in the graph instead of carried by hand. This recipe
+stays correct for a graph that uses no multi-face nodes.
 
 ---
 
@@ -861,6 +998,395 @@ sampling pass.
 
 Use it when the stitch looks misaligned, or to confirm gap-filling behaved on a video where the
 subject turns away.
+
+---
+
+## H3 Multi-Face Plan
+
+Decides who the **subjects** of a job are, and decides it once. It detects the **target clip** on
+one frame — the **match frame** — and the **reference still**, pairs the two sets of faces
+positionally, cuts one **subject reference** per subject out of the still, and writes the
+**subject plan**, the crops and a numbered preview of both plates into the **job folder**. Every
+node downstream reads that folder instead of detecting anything again, so this is the only node in
+the multi-face chain that ever needs the reference still wired in.
+
+It is an **output node**: the `report` and the `preview` are meant to be read off it *before*
+anything is queued. That is the whole point of it — a wrong pairing costs one H3 render per
+subject, so it has to be visible at the node that made it.
+
+**Inputs**
+
+| Input | Default | What it does |
+|---|---|---|
+| `images` | - | The **target clip**, as an `IMAGE` batch — from **H3 Load Video + Face Select** or VideoHelperSuite. This node does not load video. |
+| `reference_still` | - | One high-quality image of the same scene, framed the same way as the clip. Its faces supply the detail. Only the first image of a batch is used, and if the batch holds more than one the report says which was paired. |
+| `detector` | `face_yolov8m.pt` | The detector used on **both** plates, so the two sets of boxes mean the same thing. Same list as the other nodes here. |
+| `confidence` | `0.35` | The detector's score floor, applied to both plates. Lower finds small and turned faces on both. |
+| `match_frame` | `0` | The frame of the target clip whose face positions line up with the still. Pairing happens only here, so pick a frame every subject is clearly in; it need not be frame 0. A value outside the clip is clamped and the report says so. |
+| `subject_source` | `union` | Whose faces can become subjects. `union` takes every face found on either plate and flags whether it has a subject reference, so nothing detected is dropped silently; `target_clip` takes only the clip's faces, when the clip detected better; `reference_still` takes only the still's, when the soft clip missed faces the still can see. |
+| `match_tolerance` | `0.05` | How far apart the two detections of one face may sit and still pair, as a **fraction of the clip's diagonal** so it means the same at any resolution (0.05 of a 1000×1000 clip is 71 px). The boxes must also overlap. Raise it if the still is framed tighter than the clip; lower it in a crowd. |
+| `excluded_faces` | empty | Clip face numbers to switch off, comma-separated, exactly as numbered on the `preview`: `0, 3`. An **excluded face** never becomes a subject and keeps its original pixels. A text widget, so the answer survives a reload with no front end. |
+| `max_subjects` | `0` | `0` = no cap. A cap is a **loud** truncation: it applies after the faces are ordered and after `unmatched_faces` has had its say, every dropped face is named in the report with its position at the match frame, and the number the cap saves is printed beside the number it spends. It also joins the **pairing fingerprint**, because a cap changes who the subjects are. |
+| `job_name` | empty | The **job folder** under ComfyUI's output folder. Left blank it is named after the clip. **Keep the same name to resume a job** — change it, or change any input the fingerprint tracks, and the nodes refuse rather than mixing two pairings into one clip. |
+| `unmatched_faces` | `leave` | What becomes of an **unpaired face** — a face on one plate with no partner on the other. It decides the **subject set**, so it lives here rather than on the pass nodes, and it is recorded in `plan.json`. See [`unmatched_faces`](#unmatched-faces-three-answers). |
+
+**Outputs**
+
+| Output | Goes to |
+|---|---|
+| `plan` | the `H3FACEPLAN` output feeds **H3 Subject Select**, **H3 Pass Save**, **H3 Pass Load** and **H3 Multi-Face Composite**. It carries the job folder's name, which is why none of those nodes has a `job_name` widget of its own — and why two jobs in one output tree cannot read each other's references. |
+| `preview` | both plates side by side at the match frame, every face numbered, subjects outlined in their palette colour, excluded faces slashed red, faces with no partner marked. Wire it to any image viewer, or read it off the node. |
+| `report` | printed on the node: who is in the job, what it costs, what was written where, and every decision the plan made about faces it could not pair. |
+| `subject_count` | how many passes this job is. Wire it anywhere you want the number, and check it against the cost line before queueing. |
+
+---
+
+### What the report says, and the job folder it writes
+
+A two-subject job — three faces found on the clip, two on the still, `max_subjects` at `2`,
+`unmatched_faces` on `with_still` — prints this. Paths abridged, every sentence the node's own:
+
+```
+job             shot 07
+target clip     1000x1000   4 frame(s)   match frame 2
+reference still 2000x2000   still -> clip scale 0.500   (1 clip px = 2.000 still px)
+cost            2 subject(s) x 4 frame(s) @ 768x768   = 8 frame(s) to generate
+                (canvas size is H3 Face Track + Crop's; crops are 2.5x face height)
+pairing         union   tolerance 0.050 = 71px of the 1000x1000 diagonal   2 of 3 clip face(s) paired
+excluded        none
+max_subjects    2
+capped          subject cap 2: 1 face(s) dropped - clip face 2 (at 850, 180 on frame 2). Raise max_subjects to include them, or switch a face off with excluded_faces to spend those generations elsewhere on purpose.
+                2 subject(s) of 3 to generate; uncapped cost would be 3 subject(s) x 4 frame(s)
+unmatched       with_still   1 paired   0 subject(s) with no reference   1 subject(s) on the whole still   0 face(s) left out
+subject 0       clip face 0   reference from still face 0, 600x600px at the still's native resolution -> subject_0.png
+subject 1       clip face 1   reference is the WHOLE reference still, 2000x2000px -> subject_1.png   whole-frame conditioning: H3 picks which face in it to apply
+written         <output>/shot 07
+                plan.json + 2 subject reference file(s) + pairing_preview.png
+notes
+                - clip face 1 (at 450, 450 on frame 2) is subject 1 with the whole reference still as its subject reference (2000x2000px): unmatched_faces=with_still, so the conditioning is whole-frame and H3 chooses which face in the still it applies to - not a guarantee the right face is used.
+                - plan: <output>/shot 07/plan.json
+```
+
+`cost`, `pairing` and the one line per **subject** are what to read before queueing: how many
+renders this job is, whether the pairing actually found the people you can see, and who each render
+will be about. The `unmatched` line counts what the plan decided about faces that found no partner;
+the `capped` line appears only when `max_subjects` cut someone.
+
+The folder itself:
+
+```
+<output>/<job_name>/
+    plan.json                      the subject plan, and the pairing fingerprint every later
+                                   node checks itself against before it touches anything
+    manifest.json                  the pass manifest: which subject has which pass stage on
+                                   disk, and which passes are therefore complete
+    pairing_preview.png            both plates at the match frame, every face numbered
+    subject_0.png  subject_1.png   one subject reference each - a crop of the still, or, for a
+                                   whole-still subject, all of it
+    passes/
+        subject_0000/
+            crops/frame_0000.png …     the crops that pass was fed, in frame order
+            crops.json                 where each of those crops sat in its frame
+            stitched/frame_0000.png …  that pass composited back onto the target clip
+```
+
+Subject folders are numbered `subject_NNNN` — four digits — while the reference PNGs are not, so a
+job with more than ten subjects still sorts correctly on disk. `crops.json` exists **once per
+subject**, never once per stage: a stitched pass must not rewrite the positions its crops were cut
+with, and H3 Pass Save says so out loud if you wire `transform` into it anyway.
+
+The crops are checkpointed for two reasons. A job that dies mid-subject keeps that work instead of
+paying for another detection pass and another track; and the PNGs are ordinary files, so you can
+open `passes/subject_0000/crops/` and see exactly what H3 was fed — the fastest way to explain a
+result you did not want.
+
+### `unmatched_faces`: three answers
+
+A face found on one plate at the match frame with no partner on the other is an **unpaired face**.
+What it becomes is decided here, once, because it changes the **subject set** — and the subject set
+is what the composite is gated on and what the fingerprint compares. The three modes, in the
+report's own words:
+
+- **`leave`** (the default): the face is **not a subject at all**. No pass ever runs for it, so it
+  keeps the pixels the clip arrived with. The report names every face it left out and ends the
+  sentence with `That is not a failure: it is the safe default when the pairing might be wrong.`
+  Leaving is the safe default because an unpaired face is often a detection artefact, or someone who
+  is in the clip and not in the still — refining them from a stranger's face is worse than leaving
+  them alone. `leave` also **renumbers the survivors contiguously**: switching off the middle face
+  turns `subject_2.png` into `subject_1.png`, because pass folders, manifest keys, `next` and the
+  composite order all count on there being no gaps in the numbering.
+- **`no_reference`**: the face **is** a subject (`ref_kind: none`), with no reference file written.
+  Its pass runs with nothing wired into H3's `ref_image` slots, which the slots allow — they
+  autogrow from zero — and the report says what that costs: `the refinement is driven by identity
+  and quality only and will be weaker than a paired subject`.
+- **`with_still`**: the face **is** a subject whose **subject reference** is the **whole still**,
+  written out as `subject_N.png` like any other. The conditioning is whole-frame, so *H3 chooses
+  which face in the still it applies* — a face in the still that is not this subject can be the one
+  whose detail gets transferred. That is a warning about how H3 works, not a bug to tune out.
+
+A face that did find its partner is unaffected: `crop` references, pairing and passes are identical
+in all three modes. Read `ref_kind` (`crop | still | none`) rather than whether a reference crop
+exists — a whole-still subject's crop is the full frame.
+
+### The refusal sites: why two pairings never share a clip
+
+The **pairing fingerprint** is the set of inputs that decide who is who: both plate sizes, the
+match frame, `subject_source`, `match_tolerance`, the exclusions, `unmatched_faces`, `max_subjects`,
+and the subject set itself. It is compared at three sites — **H3 Multi-Face Plan** before it
+overwrites a folder, and **H3 Pass Save**, **H3 Pass Load** and **H3 Multi-Face Composite** before
+they read or write a pass. They exist because a job folder holding two pairings' passes does not
+fail: it returns a clip with faces quietly swapped that looks finished.
+
+The refusal names every input that disagrees, one line each, then what to do:
+
+```
+<output>/shot 07/plan.json was written from different pairing inputs, so this would mix two
+pairings into one job folder:
+  - match_frame: the job folder has 5, this plan has 2
+Set job_name on H3 Multi-Face Plan to a new name for this pairing, or re-run that node
+deliberately with the SAME inputs to resume this job. If the inputs really are meant to change,
+rename or delete the job folder first: every pass already inside it was cut from the inputs above.
+```
+
+Re-planning the *same* inputs into the *same* `job_name` is a resume, and is allowed — that is how
+a job gets come back to. A subject-set change reports itself as a set difference rather than two
+numbers: `subject set: in the job folder: subject 1 (clip face 2, still face 1) | in this plan: …`.
+The pass nodes add a second gate that refuses a manifest recording a subject this plan does not
+have, which is what catches a folder left over from a plan you have since changed.
+
+### The pairing preview panel
+
+The plan node carries a panel — **View pairing preview** — showing `pairing_preview.png` and every
+subject's reference crop, so a pairing can be checked beside the node that made it instead of by
+opening the folder in a file browser.
+
+It is **read-only, and deliberately so**: it reads `plan.json`, `pairing_preview.png` and the
+`subject_N.png` files out of the job folder and decides nothing of its own, so it cannot disagree
+with the graph. Exclusions stay the typed `excluded_faces` widget — there is no click-to-exclude,
+because a panel that re-decided the plan in the browser would be a second source of truth about who
+the subjects are, and the plan is the one the passes were already cut against.
+
+It **refuses to open or refresh while a render is running**, with no override, and the front end
+and the route enforce that independently:
+
+```
+A render is running, so the pairing panel will not open or refresh. The job folder it reads is the
+one that render is writing into, so what it shows could be half-written. Try again once the queue
+is clear.
+```
+
+The reason is not the cost of reading a JSON file: it is that a panel held open over a job folder
+that a render is writing shows a pairing that the render in front of it may be about to invalidate.
+
+## H3 Subject Select
+
+Takes **one subject** out of the subject plan and hands the released tracker a pick payload for
+that person alone, in exactly the shape `H3 Face Track + Crop` already accepts (ADR 0005). Nothing
+is detected here: the plan says who the subject is and what their **subject reference** is, the
+clip's own pick payload carries a box for every frame, and the node narrows the second to the first.
+Detection therefore stays exactly once in your graph — the loader did it, this node reads it, and
+the tracker that follows runs no detection pass at all.
+
+One branch of the graph per **pass**. Queue it once per subject, changing only the `subject` widget —
+or leave that on `next` and let the **pass manifest** move the cursor for you.
+
+**Inputs**
+
+| Input | Default | What it does |
+|---|---|---|
+| `plan` | - | The subject plan from **H3 Multi-Face Plan**: who the subjects are, which face in the clip each one is, which face in the still became their subject reference, and whether they were paired at all. It records the match frame's boxes only, so it cannot name this subject in the other shots on its own — that is what `face_pick` is for. |
+| `face_pick` | - | The clip's own pick payload, from the same **H3 Load Video + Face Select** the images come from: every frame's boxes, confidences and shot boundaries. Its picks are replaced with this subject's; the boxes pass through untouched. **Do not resize, crop or trim between the loader and this node** — every box would land in the wrong place. |
+| `subject` | `next` | Which subject this pass refines. `next` is the first subject in plan order with no completed pass recorded in the job folder — the resume cursor, so a job interrupted between subjects starts again on the right one. A number takes that subject by the number the plan prints in its report and on the pairing preview, which is how you re-run one subject on purpose. The dropdown cannot list the plan's own names, because ComfyUI asks for the options before anything is wired; the report names everyone in the plan, and an answer that is not one of them lists them. |
+
+**Outputs**
+
+| Output | Goes to |
+|---|---|
+| `face_pick` | **H3 Face Track + Crop → `face_pick`**, and on to **H3 Pass Save** if you checkpoint the crops. |
+| `subject_reference` | H3's `ref_image_*` slots, and **nowhere else**. For a whole-still subject it is the entire reference still. |
+| `reference_exists` | `1` / `0`. `0` means this subject has no subject reference — a normal state of a plan under `unmatched_faces=no_reference`, not an error, and it means nothing is wired into the H3 node's reference slots. |
+| `subject_index` | **H3 Pass Save** and **H3 Pass Load → `subject`**, so the pass and the selection can never disagree. |
+| `report` | who was chosen, which frame each shot locks onto, where the reference came from, and this subject's **shot account**. |
+
+> **Leave `identity_reference` unwired.** Each subject's **identity anchor** is rebuilt from their
+> own matched crops in the **target clip**, which the released tracker does by itself once a
+> `face_pick` names the subject per shot. Wiring `subject_reference` into `identity_reference`
+> anchors the track in a different image domain — the still against the clip — which is how a
+> subject gets lost mid-shot. The subject reference is H3's picture input, not an identity input
+> (ADR 0003).
+
+### The shot account
+
+Every pass reports itself **per shot**, and the two kinds of empty shot are worded differently on
+purpose, because only one of them is worth fixing:
+
+```
+shots   subject 0 is not in shot 2 (frames 4-7): the plan put an absent entry on this shot - no frame
+        of it shows this subject, so there is nobody here for the pass to refine - original pixels are
+        kept there, which is the intended result for an absence - if this person IS in this shot, plan
+        on a match frame they share with the reference still, or name them with Pick faces
+shots   subject 0 was lost in shot 3 (frames 8-11): 4 of 4 frame(s) produced nobody - faces were
+        detected in this shot but none of them matched this subject's identity; check identity_track
+        and identity_threshold, or lower confidence, on H3 Face Track + Crop
+```
+
+A **planned absence** is the plan's decision and the clip's own pixels stay: expected, not a failure.
+A **lost track** is the tracker arriving with the subject selected and producing nobody: check
+`identity_track`, `identity_threshold` or `confidence` on the tracker. Both name the shot and its
+**clip frame numbers**, so you can scrub straight to it. Neither asks for a new widget: the crop
+positions come from the `transform` already wired into H3 Pass Save, or are read back out of the
+pass's `crops.json` — and a pass nobody has run yet says so instead of claiming a clean bill of
+health.
+
+## H3 Pass Save
+
+Writes one **pass stage** into the **job folder**: the frames as an ordinary numbered PNG sequence,
+the crop positions as readable JSON, and the **pass manifest** entry saying how far this subject
+got. It sits **inline** in the chain — `images` comes straight back out — so checkpointing a pass
+costs nothing to wire.
+
+**Only the `stitched` stage completes a subject.** A `crops` entry means "this far got done": a job
+that died after the crops keeps that work and resumes on the same subject instead of declaring it
+finished. The asymmetry is deliberate — crops are cheap to keep and worthless as a result.
+
+**Inputs**
+
+| Input | Default | What it does |
+|---|---|---|
+| `plan` | - | The subject plan from **H3 Multi-Face Plan**. It carries the job folder and the subject set, so this node needs no `job_name` of its own — and the plan is checked against the `plan.json` already in that folder before a single frame is written. |
+| `subject` | `0` | Whose pass this is. Wire **H3 Subject Select → `subject_index`** in and the two can never disagree. A number the plan does not have is refused, rather than checkpointing a subject nobody planned. |
+| `stage` | `crops` | Which half of the pass is being checkpointed. `crops` writes the crops H3 was fed plus their positions, and does **not** finish a subject. `stitched` writes the frames composited back onto the clip; recording it is what completes the pass and lets the job resume past them. |
+| `images` | - | The crop batch for `stage=crops`, the stitched frames for `stage=stitched`. Written in frame order as `frame_0000.png` onward through the same PNG writer as the subject references, so you can open them and see exactly what H3 was given. The names never change: re-running a pass overwrites its own frames instead of leaving a second copy nobody can line up with frame 7. The batch has to be float 0-1 — a `uint8` batch is refused with a convert-it message rather than written back as noise. |
+| `transform` *(opt)* | - | The crop positions from **H3 Face Track + Crop**. **Required for `stage=crops`** — without them the crops cannot be put back where they were cut. For `stage=stitched` there is nothing new to record, so leave it unwired: a subject's positions belong to its crops stage, and rewriting them from a stitched pass would put those frames back somewhere other than where they were cut. The report says which of the two happened. |
+
+**Outputs:** `images` (the batch, unchanged, so the node can sit mid-chain), `report`,
+`subject_index`, `pass_complete` (`1` once `stitched` is recorded). It is an output node, so the
+report and the flag can be read off it at the end of a pass without a viewer attached.
+
+The middle of a pass, in the manifest's own words:
+
+```
+subject 0   stage crops   4 frame(s) at 768x768
+images: <output>/shot 07/passes/subject_0000/crops
+          frame_0000.png ... frame_0003.png   ordinary PNGs: open them to see what this pass was actually fed
+crop positions: <output>/shot 07/passes/subject_0000/crops.json
+pass NOT complete yet: a subject only counts as done once its stitched stage is recorded, so a half-finished pass is resumed, not skipped
+manifest: <output>/shot 07/manifest.json
+next subject still up: 0   H3 Subject Select's next takes it, and this subject again until its stitched stage is recorded
+```
+
+The complete flag is **derived** inside the manifest writer from the stages actually on disk; no
+caller can set it, which is why a job cannot be talked into believing it is finished.
+
+## H3 Pass Load
+
+Reads one subject's **pass stage** back out of the job folder. Nothing here re-detects, re-tracks or
+re-generates — which is the point: a resumed job pays for neither the detector, nor the tracker, nor
+a finished render.
+
+**Inputs**
+
+| Input | Default | What it does |
+|---|---|---|
+| `plan` | - | The same subject plan the pass was saved with. Checked against the folder's `plan.json` first, so a pass cannot be read into a job planned from a different pairing. |
+| `subject` | `0` | Whose pass to read — the number **H3 Pass Save** wrote it under. Wire **H3 Subject Select → `subject_index`** and it cannot drift. |
+| `stream` | `crops` | `crops`: the crops that were fed to H3, with their crop positions — wire them into **H3 Face Stitch**'s `refined_crops` and `transform` to composite a checkpointed pass without re-tracking. `stitched`: the frames that pass composited back onto the clip — wire them into the next subject's `base_images`. |
+
+**Outputs:** `images`, `transform`, `report`. The `transform` comes back as the payload the tracker
+built — `canvas`, `src_size` and `segments` as tuples — so a checkpoint feeds the released stitch
+node directly; for `stream = stitched` it is returned too when the positions exist, which is what
+lets a saved pass be re-stitched. A `crops` stream without its positions raises instead of handing
+back frames nothing can be assembled from; a `stitched` stream whose positions were never saved
+returns an empty `transform` and says so, because those frames are already composited.
+
+A pass that is on disk:
+
+```
+subject 0   stage stitched   4 frame(s) at 1000x1000
+images: <output>/shot 07/passes/subject_0000/stitched
+          frame_0000.png ... frame_0003.png   ordinary PNGs: open them to see what this pass was actually fed
+pass COMPLETE - crops and stitched are both recorded
+manifest: <output>/shot 07/manifest.json
+crop positions: <output>/shot 07/passes/subject_0000/crops.json   4 frame(s); canvas, src_size and segments come back as tuples, the payload the tracker built
+```
+
+The frame count comes from the **manifest record**, never from a tensor in the graph — so a
+half-deleted frame sequence is a named refusal (`3 of 4 frame(s) are missing from …`) rather than a
+short batch that quietly resizes the job.
+
+## H3 Multi-Face Composite
+
+The end of the job: the **composited clip**, plus the proof that every subject is actually in it.
+
+**It re-blends nothing, deliberately.** Each pass was feathered once by **H3 Face Stitch**, and each
+pass composited onto the previous pass's result — so the last subject's stitched frames already
+contain every earlier pass. This node picks those frames up off disk. There is no `base_images` and
+no `transform` on it because a second feather laid over a feathered edge is how a freshly refined
+face goes soft, which is the one thing this feature must not do to work that is already good.
+
+### The chaining recipe
+
+Said once, because it is the whole arrangement:
+
+- subject 0's **H3 Face Stitch** takes the **target clip** as its `base_images`;
+- subject 1's takes **H3 Pass Load** with `stream = stitched`, `subject = 0`, wired into that stitch
+  node's `base_images`; subject 2's takes subject 1's, and so on down the plan;
+- **H3 Multi-Face Composite** returns the last subject's stitched frames as the finished clip.
+
+**Composite order is plan order** — subjects numbered left to right at the match frame — and it is
+deliberately **not a widget**. A widget would let the order drift away from the numbering the
+reports, the pairing preview and the manifest all use, and then "subject 1" would mean two different
+people inside one job. To change the order, change what is in the shot at the match frame.
+
+**Inputs**
+
+| Input | Default | What it does |
+|---|---|---|
+| `plan` | - | The subject plan every pass in this job ran on. Its subject order **is** the composite order, and it is checked against the `plan.json` already in the job folder: if the pairing inputs differ, the passes in that folder were cut from a different pairing, and this refuses rather than stitching two ideas of who is who into one clip. |
+| `images` | - | The **target clip** — the same `IMAGE` batch that fed the first pass's H3 Face Stitch, from the same loader, unresized and untrimmed. Nothing is composited onto it here. It is wired in so the node can **prove the chain is complete**: every recorded stitched pass has to hold this many frames at this size, or the frames in the folder are not this clip's. It is also where the finished clip's audio comes from — see the audio note. |
+| `overlap_threshold` | `0.25` | How much of their combined area two subjects' crop regions may share at the match frame before the report warns about them. `0` warns about any overlap, `1` never warns. Measured on the crop regions **H3 Face Track + Crop** would cut, not on the faces inside them. **A warning, never a refusal**: two people standing close are still two subjects and the clip is still the right answer — but one pass's feathered edge lands on the other's refined pixels, and a soft seam across a face is easier to live with once you know where it is. |
+
+**Outputs:** `images` (the composited clip), `report`, `final_subject` (whose frames those are),
+`subject_count`. It is an output node, so the report — the gate's verdict — reads off the node.
+
+**The gate.** A job queued once per subject and interrupted between subjects would otherwise hand
+back a clip where one person is sharp and the other is still blurry, looking finished. So every
+subject's `stitched` stage has to be recorded in the manifest, and its frame count and frame size
+have to agree with the clip wired in here. Anything missing and the node refuses, naming every
+subject that never landed and pointing at `next`:
+
+```
+2 of 2 pass(es) are not in <output>/shot 07, in plan order subject 0 -> subject 1:
+  - subject 0: no stitched pass is recorded in the manifest, so this subject's refined face is nowhere in the job folder
+  - subject 1: no stitched pass is recorded in the manifest, so this subject's refined face is nowhere in the job folder
+next subject: 0   H3 Subject Select's next goes to that subject: run its pass through to H3 Face Stitch, then save it with H3 Pass Save stage=stitched.
+This composite refuses: a half-composited clip is worse than an error. It would look finished while the faces of the subjects named above kept the pixels the target clip arrived with.
+```
+
+**Audio.** These nodes carry image batches only, so the finished clip's audio is the **target
+clip's** audio and every pass's generated audio was discarded. The report says so at the end of
+every successful run — a silent surprise at the end of a long job is its own kind of bug — and the
+fix is the one the single-subject graph already uses: wire the target clip's own audio into your
+save node.
+
+A finished two-subject job:
+
+```
+job folder: <output>/shot 07
+order: subject 0 -> subject 1   plan order = left to right at match frame 2
+chained: each pass composited onto the previous pass's stitched result and the first onto the target clip. Nothing is blended here: H3 Face Stitch feathered each pass once, and feathering a feathered edge again softens the work
+subject 0   stitched 4 frame(s) at 1000x1000px   <output>/shot 07/passes/subject_0000/stitched
+subject 1   stitched 4 frame(s) at 1000x1000px   <output>/shot 07/passes/subject_0001/stitched
+final result: subject 1's stitched frames   those 4 frame(s) already carry subject 0 composited into them
+no overlapping subject crop regions at match frame 2 (threshold 0.25)
+audio: the finished clip carries the target clip's audio. Each pass's generated audio was discarded - these nodes only ever carry image batches, so wire the target clip's own audio into your save node.
+```
+
+Two subjects whose crop regions overlap print this instead — and the job still runs:
+
+```
+overlap warning: subject 0 and subject 1 crop regions share 67.4% of their combined area at match frame 2, past the 0.25 set here - if they are two people, one pass's feathered edge lands on the other's refined pixels
+```
 
 ---
 
