@@ -70,6 +70,11 @@ def pack(tmp_path, monkeypatch):
         comfy.nested_tensor = nested
         monkeypatch.setitem(sys.modules, "comfy", comfy)
         monkeypatch.setitem(sys.modules, "comfy.nested_tensor", nested)
+    # The plan node asks for the output root, so it must never resolve to a real ComfyUI
+    # output folder. Importing the tracker test puts ComfyUI's own tree on sys.path, which
+    # makes the real `folder_paths` importable mid-collection - so redirect the output root
+    # whether or not a stub had to be invented for it. Model lookup stays real, since this
+    # test drives the detector through a fake model, not through model discovery.
     if importlib.util.find_spec("folder_paths") is None:
         paths = types.ModuleType("folder_paths")
         paths.get_output_directory = lambda: str(tmp_path / "output")
@@ -81,6 +86,10 @@ def pack(tmp_path, monkeypatch):
         paths.get_filename_list = _no_models
         paths.get_full_path = lambda key, name: None
         monkeypatch.setitem(sys.modules, "folder_paths", paths)
+    else:
+        import folder_paths as paths
+        monkeypatch.setattr(paths, "get_output_directory",
+                            lambda: str(tmp_path / "output"), raising=False)
 
     name = "h3_facerefine_under_test"
     spec = importlib.util.spec_from_file_location(
