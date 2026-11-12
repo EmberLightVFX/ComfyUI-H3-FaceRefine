@@ -11,6 +11,13 @@ Import boundary: nothing that needs ComfyUI, torch or the detector is imported a
 level. `INPUT_TYPES()` has to be callable in a test run that has only numpy installed, and
 the contract that pins the widget order runs there (ComfyUI stores widget values
 positionally, so that order is a promise - see `tests/test_node_contract.py`).
+
+Ticket #4 adds the last node of the chain, **H3 Multi-Face Composite**: it reads every
+subject's `stitched` stage out of the job folder and hands back the LAST one's frames, because
+each pass composited onto the previous pass's result - so the finished clip is that subject's
+stitched output, not a blend of all of them. It re-blends nothing (a second feather over a
+feathered edge softens the work), and it refuses when a subject's pass is missing rather than
+returning a half-composited clip.
 """
 
 from __future__ import annotations
