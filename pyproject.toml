@@ -36,7 +36,7 @@ Repository = "https://github.com/Carasibana/ComfyUI-H3-FaceRefine"
 # Test-only requirements, kept out of `dependencies`: a ComfyUI user installing the pack
 # through the registry must never pull pytest. `tests/` runs on numpy alone - no ComfyUI,
 # no torch, no weights, no GPU - which is what makes the geometry under multi-face
-# pairing testable at all (see conftest.py and .github/workflows/tests.yml).
+# pairing testable at all (see h3_collection.py and .github/workflows/tests.yml).
 [dependency-groups]
 dev = [
     "pytest>=8",

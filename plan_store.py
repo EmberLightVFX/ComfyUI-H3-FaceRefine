@@ -730,8 +730,8 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
         subject["index"] = index
 
     # The cap (#10) spends the generations on purpose. The first N faces in the order the job
-    # runs them are the job; the tail is dropped, and dropped LAST because `leave` (#8) already
-    # took the unpaired faces out first - nobody is named twice. A dropped face follows #8's rule
+    # runs them are the job; the tail is capped, and capped LAST because `leave` (#8) already
+    # took the unpaired faces out first - nobody is named twice. A capped face follows #8's rule
     # for a left-out face: `index: None`, so it can never be numbered, selected, reach `next`, or
     # be indexed into a pass folder. It keeps where it stood on the match frame so the report can
     # name each one instead of cutting the tail quietly.
@@ -787,7 +787,7 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
         # Faces `unmatched_faces=leave` took out of the subject set. Not subjects, so no pass
         # ever runs for them - which is why they keep their original pixels.
         "left_out": left_out,
-        # Faces `max_subjects` dropped so the generations get spent elsewhere (#10). They found a
+        # Faces `max_subjects` caps so the generations get spent elsewhere (#10). They found a
         # partner and would have been subjects; the cap said otherwise. This is where that
         # decision stays readable afterwards, and why the report can still name them.
         "capped_out": capped_out,
@@ -934,7 +934,7 @@ def _json_default(value):
 
 
 def _capped_label(subject, frame) -> str:
-    """How a face the cap dropped is named in the report.
+    """How a capped face is named in the report.
 
     The numbers are the ones a user reads off the pairing preview, so a clip face is named in the
     clip's own pixels and a face only the still ever saw is named where it would have stood.
@@ -955,20 +955,20 @@ def _capped_label(subject, frame) -> str:
 
 
 def capped_lines(plan) -> list:
-    """The truncation sentence, naming every face the cap dropped.
+    """The truncation sentence, naming every capped face.
 
     A tail cut in silence reads like the pairing went wrong, so this never returns a bare count:
-    each dropped face is named with the position a user can find it at, and the sentence says what
-    to do about it. Empty when nobody was dropped.
+    each capped face is named with the position a user can find it at, and the sentence says what
+    to do about it. Empty when nothing was capped.
     """
     inputs = (plan or {}).get("inputs") or {}
     cap = int(inputs.get("max_subjects") or 0)
-    dropped = (plan or {}).get("capped_out") or []
-    if not cap or not dropped:
+    capped = (plan or {}).get("capped_out") or []
+    if not cap or not capped:
         return []
     frame = (plan or {}).get("match_frame")
-    named = ", ".join(_capped_label(subject, frame) for subject in dropped)
-    return [f"subject cap {cap}: {len(dropped)} face(s) dropped - {named}. "
+    named = ", ".join(_capped_label(subject, frame) for subject in capped)
+    return [f"subject cap {cap}: {len(capped)} face(s) capped - {named}. "
             f"Raise max_subjects to include them, or switch a face off with excluded_faces to "
             f"spend those generations elsewhere on purpose."]
 
@@ -979,11 +979,11 @@ def uncapped_cost_line(plan, frames) -> str:
     The cap's whole point is generations saved, so the number it saved has to sit beside the
     number it spends. Empty when the cap changed nothing.
     """
-    dropped = len((plan or {}).get("capped_out") or [])
-    if not dropped:
+    capped = len((plan or {}).get("capped_out") or [])
+    if not capped:
         return ""
     running = int((plan or {}).get("subject_count") or 0)
-    total = running + dropped
+    total = running + capped
     return (f"{running} subject(s) of {total} to generate; uncapped cost would be "
             f"{total} subject(s) x {int(frames)} frame(s)")
 

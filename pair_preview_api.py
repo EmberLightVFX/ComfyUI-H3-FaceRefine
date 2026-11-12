@@ -84,7 +84,8 @@ def _view_url(root: str, path: str) -> str:
 
 
 def _face_number(value):
-    """A face number, or None. `leave` and the cap both give a dropped face `index: None`, and
+    """A face number, or None. `leave` and the cap both give a face that is not a subject
+    an `index: None`, and
     that is exactly what the panel has to show: a face with no subject number."""
     return None if value is None else int(value)
 
@@ -158,8 +159,8 @@ def _subject_row(root, job, subject) -> dict:
     }
 
 
-def _dropped_row(face) -> dict:
-    """A face that is not a subject: left out by `unmatched_faces=leave` (#8) or dropped by
+def _not_subject_row(face) -> dict:
+    """A face that is not a subject: left out by `unmatched_faces=leave` (#8) or capped by
     `max_subjects` (#10). Never a subject number - those entries carry `index: None`, which is
     what keeps them out of every pass folder."""
     return {
@@ -232,8 +233,8 @@ def preview_state(job_name) -> dict:
     # The faces the plan took out of the subject set, named rather than counted: `leave` (#8)
     # and the cap (#10) both decide who does NOT get refined, and both have to stay findable
     # afterwards. Never index these entries - they carry `index: None`.
-    state["left_out"] = [_dropped_row(s) for s in (plan.get("left_out") or [])]
-    state["capped_out"] = [_dropped_row(s) for s in (plan.get("capped_out") or [])]
+    state["left_out"] = [_not_subject_row(s) for s in (plan.get("left_out") or [])]
+    state["capped_out"] = [_not_subject_row(s) for s in (plan.get("capped_out") or [])]
     state["counts"] = plan_store.subject_kind_counts(plan)
     state["run"] = dict(plan.get("run") or {})
     # The pairing inputs, read out of the plan rather than off the widgets: this is what the job

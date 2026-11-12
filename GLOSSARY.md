@@ -102,6 +102,14 @@ _Avoid_: excluded face, skipped subject, dropped face
 A subject reference that is the entire reference still instead of a crop of it (`unmatched_faces=with_still`), used for a subject with no paired face in the still. Conditioning is whole-frame, so which face in the still H3 applies is not guaranteed.
 _Avoid_: full-frame reference, fallback crop, whole-image reference
 
+**Subject cap**:
+The `max_subjects` limit on how many subjects a job runs. It spends the generations, so it truncates the ordered subject set rather than merely reporting a count, and it is part of the pairing fingerprint because two caps are two different jobs.
+_Avoid_: subject limit, subject budget, max faces
+
+**Capped face**:
+A face the subject cap took out of the job so the generations could go elsewhere. It found a partner and would have been a subject; unlike a left-out face it was not unmatched, and unlike an excluded face nobody switched it off. It keeps no subject number and can never be selected or resumed, and the plan records it in `capped_out` so the report can still name it.
+_Avoid_: dropped face, skipped subject, cut subject
+
 ## Distinguish these three "references"
 
 - **Reference still** — the high-quality image of the whole scene.

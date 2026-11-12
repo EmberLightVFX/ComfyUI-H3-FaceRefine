@@ -244,7 +244,7 @@ function render(d, data, node) {
         d.body.appendChild(chips(data.left_out, "warn", (f) => f.pairing));
     }
     if ((data.capped_out || []).length) {
-        d.body.appendChild(el("h4", "h3pp-sect", "dropped by max_subjects"));
+        d.body.appendChild(el("h4", "h3pp-sect", "capped by max_subjects"));
         d.body.appendChild(chips(data.capped_out, "warn", (f) => f.pairing));
     }
 

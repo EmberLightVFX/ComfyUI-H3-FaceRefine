@@ -1060,7 +1060,7 @@ crop factor     2.5   each subject reference was cut at crop_factor 2.5 x face h
 pairing         union   tolerance 0.050 = 71px of the 1000x1000 diagonal   2 of 3 clip face(s) paired
 excluded        none
 max_subjects    2
-capped          subject cap 2: 1 face(s) dropped - clip face 2 (at 850, 180 on frame 2). Raise max_subjects to include them, or switch a face off with excluded_faces to spend those generations elsewhere on purpose.
+capped          subject cap 2: 1 face(s) capped - clip face 2 (at 850, 180 on frame 2). Raise max_subjects to include them, or switch a face off with excluded_faces to spend those generations elsewhere on purpose.
                 2 subject(s) of 3 to generate; uncapped cost would be 3 subject(s) x 4 frame(s)
 unmatched       with_still   1 paired   0 subject(s) with no reference   1 subject(s) on the whole still   0 face(s) left out
 subject 0       clip face 0   reference from still face 0, 600x600px at the still's native resolution -> subject_0.png

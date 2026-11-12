@@ -161,7 +161,7 @@ def test_the_subject_combo_stays_a_plain_list_of_numbers():
 def test_the_truncation_line_names_every_dropped_face_and_how_to_fix_it():
     text = "\n".join(ps.capped_lines(_plan(max_subjects=1)))
 
-    assert "subject cap 1: 2 face(s) dropped" in text
+    assert "subject cap 1: 2 face(s) capped" in text
     # Both faces named, with the positions a user reads off the pairing preview.
     assert "clip face 1 (at 450, 450 on frame 12)" in text
     assert "clip face 2 (at 850, 180 on frame 12)" in text

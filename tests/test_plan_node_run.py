@@ -152,7 +152,7 @@ def test_the_cap_reports_loudly_at_the_node(pack, monkeypatch):
 
     assert count == 1 == plan["subject_count"]
     assert [s["clip_face"] for s in plan["capped_out"]] == [1, 2]
-    assert "subject cap 1: 2 face(s) dropped" in report
+    assert "subject cap 1: 2 face(s) capped" in report
     assert "clip face 1 (at 450, 450 on frame 2)" in report
     assert "clip face 2 (at 850, 180 on frame 2)" in report
     assert "Raise max_subjects" in report
