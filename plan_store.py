@@ -1334,6 +1334,9 @@ def shot_account(plan=None, subject=None, transform=None, pick=None) -> list:
             "frames_present": len(present), "frames_absent": len(absent),
             "frames_lost": len(lost), "frames_dropped": len(dropped),
             "planned_by_pick": planned,
+            # Whether the tracker itself said anything about this shot. Without it the account
+            # can only speak for what the plan decided, not for what the tracker managed.
+            "evidence": bool(kept),
             "reason": "", "action": "",
         }
         if state == SHOT_LOST:
@@ -1379,7 +1382,15 @@ def absence_lines(shots, subject) -> list:
             lines.append(f"subject {index} is partly absent inside {where}: {shot['reason']} - "
                          f"{shot['action']}")
     if not lines:
-        lines.append(f"subject {index} is in every shot of this pass - no absence, nothing lost")
+        if any(s.get("evidence") for s in shots):
+            lines.append(f"subject {index} is in every shot of this pass "
+                         f"- no absence, nothing lost")
+        else:
+            # Nothing has run the tracker for this subject yet, so a clean bill of health would
+            # be a claim about a pass nobody has made.
+            lines.append(f"subject {index} is in every shot of the plan - no absence planned, "
+                         f"and whether the tracker keeps them per shot is read from the crop "
+                         f"positions once this pass has run")
     return lines
 
 
