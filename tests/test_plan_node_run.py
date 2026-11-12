@@ -107,15 +107,19 @@ def pack(tmp_path, monkeypatch):
 
 
 def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
-         excluded="", job_name="group shot", source="union", mode="leave", max_subjects=0):
+         excluded="", job_name="group shot", source="union", mode="leave", max_subjects=0,
+         crop_factor=None):
     fake = _FakeModel([_Found(CLIP_BOXES, CLIP_CONFS), _Found(still_boxes, STILL_CONFS)])
     monkeypatch.setattr(pack.nodes, "_load_detector", lambda name: fake)
     node = pack.NODE_CLASS_MAPPINGS["H3MultiFacePlan"]()
     images = torch.zeros((4, 1000, 1000, 3))
     images.h3_video_name = "shot_07.mp4"
     still = torch.zeros((1, int(still_size[1]), int(still_size[0]), 3))
+    # crop_factor is the LAST required widget (ADR 0002), so it goes on the end of the call.
+    # Left None means "the widget was never touched", which is what a saved graph does.
+    tail = [mode] if crop_factor is None else [mode, crop_factor]
     return node.run(images, still, "face_yolov8m.pt", 0.35, 2, source, 0.05, excluded,
-                    max_subjects, job_name, mode)
+                    max_subjects, job_name, *tail)
 
 
 def test_the_plan_node_plans_pairs_and_reports(pack, monkeypatch):
@@ -181,6 +185,45 @@ def test_the_plan_and_the_subject_references_land_in_the_job_folder(pack, monkey
     from PIL import Image
     with Image.open(job / "subject_0.png") as crop:
         assert crop.size == (600, 600)
+
+
+def test_a_non_default_crop_factor_moves_every_subject_reference(pack, monkeypatch, tmp_path):
+    """The tracker derives its crop rect from its own `crop_factor` widget, so a plan that
+    assumes 2.5 mis-frames EVERY subject reference the moment anyone changes that widget."""
+    default, _, _, _ = _run(pack, monkeypatch, job_name="factor untouched")
+    tight, _, report, _ = _run(pack, monkeypatch, job_name="factor 1.5", crop_factor=1.5)
+
+    assert tight["inputs"]["crop_factor"] == 1.5
+    ps = pack.plan_store
+    assert ps.subject_crop_rect(default, default["subjects"][0]) == [0.0, 10.0, 300.0, 300.0]
+    assert ps.subject_crop_rect(tight, tight["subjects"][0]) == [60.0, 70.0, 180.0, 180.0]
+    assert default["subjects"][0]["ref_crop"] == [0, 20, 600, 600]
+    assert tight["subjects"][0]["ref_crop"] == [120, 140, 360, 360]
+
+    from PIL import Image
+    with Image.open(tmp_path / "output" / "factor 1.5" / "subject_0.png") as crop:
+        assert crop.size == (360, 360)
+    with Image.open(tmp_path / "output" / "factor untouched" / "subject_0.png") as crop:
+        assert crop.size == (600, 600)
+    # The cost line cannot claim a canvas this node never set, and the report has to say which
+    # rectangle the references were actually cut with.
+    assert "crop_factor 1.5" in report
+    assert "estimate" in report
+
+
+def test_the_untouched_default_writes_todays_bytes(pack, monkeypatch, tmp_path):
+    """Touching nothing moves nothing: the new widget's default is the tracker's default, and
+    an untouched graph writes the same subject reference it wrote before the widget existed."""
+    _run(pack, monkeypatch, job_name="untouched")
+    _run(pack, monkeypatch, job_name="explicit default", crop_factor=2.5)
+    untouched = (tmp_path / "output" / "untouched" / "subject_0.png").read_bytes()
+    explicit = (tmp_path / "output" / "explicit default" / "subject_0.png").read_bytes()
+
+    assert untouched == explicit
+    with open(tmp_path / "output" / "untouched" / "plan.json", encoding="utf-8") as fh:
+        written = json.load(fh)
+    assert written["inputs"]["crop_factor"] == pack.plan_store.DEFAULT_CROP_FACTOR
+    assert written["subjects"][0]["ref_crop"] == [0, 20, 600, 600]
 
 
 def test_excluded_faces_come_off_the_subjects_and_into_the_report(pack, monkeypatch):

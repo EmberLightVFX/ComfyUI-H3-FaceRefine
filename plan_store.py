@@ -26,15 +26,21 @@ import numpy as np
 #
 #   1  the plan as first written
 #   2  #10: max_subjects truncates the subject set, so a plan gained `capped_out`
+#   3  #11 review: a plan records the `crop_factor` its subject references were cut with
+#      (the tracker takes it from a widget, so it was never the plan's to assume), and
+#      `excluded_faces` can name a face on either plate - a bare number for the target clip,
+#      `s2` for the reference still
 #
-# Version 1 stays READABLE rather than migrated or refused for being old. It already recorded
-# `max_subjects` in `inputs` even though nothing acted on it, so the honest rule is the cheap
+# Version 1 and 2 stay READABLE rather than migrated or refused for being old. They already recorded
+# `max_subjects` in `inputs` even though nothing acted on it at first, so the honest rule is the cheap
 # one: read an old plan as it stands, say which version the folder was written with, and let the
 # pairing fingerprint decide - it compares max_subjects now, so an old folder that genuinely
 # disagrees about the cap is refused naming the difference, and one that agrees is the same job.
+# A version 1/2 folder records no crop_factor because it hard-coded the tracker's shipped default,
+# so `pairing_fingerprint` reads that default back out of it rather than calling it a difference.
 # Anything outside PLAN_READABLE_VERSIONS is refused by number rather than half-read.
-PLAN_VERSION = 2
-PLAN_READABLE_VERSIONS = (1, PLAN_VERSION)
+PLAN_VERSION = 3
+PLAN_READABLE_VERSIONS = (1, 2, PLAN_VERSION)
 PLAN_FILENAME = "plan.json"
 
 # The pairing preview image, written by the plan node into the job folder (#9). It is the same
@@ -308,7 +314,23 @@ def _checked_threshold(threshold) -> float:
     return value
 
 
-def subject_crop_rect(plan, subject, crop_factor: float = DEFAULT_CROP_FACTOR):
+def plan_crop_factor(plan) -> float:
+    """The crop factor this plan's subject references were cut at.
+
+    A job folder written before the plan recorded one (plan versions 1 and 2) cut every reference
+    at the tracker's shipped default, so that is how it is read back: an old folder is not
+    suddenly a different job because the field is missing.
+    """
+    recorded = ((plan or {}).get("inputs") or {}).get("crop_factor")
+    if recorded is None:
+        return DEFAULT_CROP_FACTOR
+    try:
+        return _checked_crop_factor(recorded)
+    except ValueError:
+        return DEFAULT_CROP_FACTOR
+
+
+def subject_crop_rect(plan, subject, crop_factor: float = None):
     """The rectangle one subject's crop covers, in TARGET-CLIP pixels at the match frame.
 
     It is `tracker_rect` - the same arithmetic the plan cut the subject reference with - so the
@@ -317,8 +339,14 @@ def subject_crop_rect(plan, subject, crop_factor: float = DEFAULT_CROP_FACTOR):
     coordinates, which is how it was framed in the first place. ``None`` when the plan recorded
     no face for that subject on either plate.
 
+    ``crop_factor`` defaults to the factor the PLAN was built at rather than to the shipped 2.5:
+    the tracker takes it from a widget, so a job run at another factor would otherwise have its
+    crop regions, its overlap warnings and its preview measured at a size no pass ever used.
+
     Returns ``[x, y, w, h]`` floats in clip pixels.
     """
+    if crop_factor is None:
+        crop_factor = plan_crop_factor(plan)
     box = (subject or {}).get("clip_box")
     if box is not None:
         return tracker_rect(box, _size(_plan_size(plan, "target_size"), "target clip"),
@@ -335,12 +363,14 @@ def subject_crop_rect(plan, subject, crop_factor: float = DEFAULT_CROP_FACTOR):
 
 
 def overlapping_subject_pairs(plan, threshold: float = DEFAULT_OVERLAP_THRESHOLD,
-                              crop_factor: float = DEFAULT_CROP_FACTOR) -> list[dict]:
+                              crop_factor: float = None) -> list[dict]:
     """Every pair of subjects whose crop regions overlap by more than ``threshold``.
 
     The measure is intersection over union of the two crop rectangles at the match frame, so 0
     means the crops merely touch and 1 means they are the same region. Exactly on the threshold
     is NOT a warning: a plan planned at a round number would otherwise warn about itself.
+    ``crop_factor`` defaults to the factor the plan was built at, so the warning is about the
+    crops the passes will actually cut.
 
     Pairs come back in plan order, the lower-numbered subject first, which is also the left to
     right order the plan was settled in. Nothing here raises for a plan with two subjects on top
@@ -446,11 +476,31 @@ def _confs(values, n: int) -> list[float]:
 # the subject plan
 # ----------------------------------------------------------------------------
 
+def _checked_crop_factor(value) -> float:
+    """The tracker's ``crop_factor`` as a usable number.
+
+    It is the crop side as a multiple of the detected face HEIGHT, so below 1.0 there is no crop
+    the tracker could make - the face would not fit in it. The plan records it because the
+    **subject reference** has to be framed at the same factor the tracker crops at, and the
+    tracker takes that from a widget: it was never this module's to assume.
+    """
+    try:
+        factor = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"crop_factor must be a number, got {value!r}") from None
+    if not factor >= 1.0:
+        raise ValueError(
+            f"crop_factor {value!r} cannot frame a face: it is the crop side as a multiple of "
+            f"face HEIGHT, so it has to be at least 1.0 (H3 Face Track + Crop ships 2.5).")
+    return factor
+
+
 def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
                        target_size, still_size, match_frame: int = 0,
                        subject_source: str = "union", tolerance: float = 0.05,
                        excluded=(), max_subjects: int = 0,
-                       unmatched_faces: str = DEFAULT_UNMATCHED_FACES) -> dict:
+                       unmatched_faces: str = DEFAULT_UNMATCHED_FACES,
+                       crop_factor: float = DEFAULT_CROP_FACTOR) -> dict:
     """Settle who the subjects of this job are, as a plain JSON-serialisable dict.
 
     Both plates were detected on the match frame, so pairing is the positional kind
@@ -474,6 +524,11 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     * ``with_still`` - it becomes a subject whose subject reference is the whole reference still.
 
     A face that found a partner is identical in all three modes.
+
+    `crop_factor` is **H3 Face Track + Crop's own crop factor**, which that node takes from a
+    widget. Every **subject reference** is cut with the rectangle that factor gives at the match
+    frame, so a plan built at a factor the tracker will not use mis-frames every reference in the
+    job - the detail it carries lands somewhere else in the crop.
     """
     tw, th, sw, sh, _scale = _plates(target_size, still_size)
     if subject_source not in SUBJECT_SOURCES:
@@ -492,6 +547,7 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     frame = int(match_frame)
     if frame < 0:
         raise ValueError(f"match_frame cannot be negative, got {frame}")
+    factor = _checked_crop_factor(crop_factor)
 
     clip = _face_array(target_boxes, "target clip faces")
     still = _face_array(still_boxes, "reference still faces")
@@ -558,12 +614,12 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
                 # The same rectangle the tracker would crop this face with, in the still's
                 # pixels at the still's native resolution.
                 subject["ref_crop"] = crop_rect_for_reference(
-                    tracker_rect(clip[clip_face], (tw, th)), (sw, sh), (tw, th))
+                    tracker_rect(clip[clip_face], (tw, th), factor), (sw, sh), (tw, th))
             else:
                 # The clip never saw this person, so the framing comes from the still's own
                 # face at the same crop_factor.
                 subject["ref_crop"] = crop_rect_for_reference(
-                    tracker_rect(still[still_face], (sw, sh)), (sw, sh), (sw, sh))
+                    tracker_rect(still[still_face], (sw, sh), factor), (sw, sh), (sw, sh))
         elif unmatched_faces == "with_still":
             # Nothing to cut: this face was never resolved in the still, so there is no
             # rectangle to map into it. `crop_rect_for_reference` is for CUT references and is
@@ -629,6 +685,10 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
             "excluded_faces": excluded_faces,
             "unmatched_faces": str(unmatched_faces),
             "max_subjects": int(max_subjects or 0),
+            # The tracker's own crop factor, recorded because it is the rectangle every
+            # subject reference in this job was cut with - and the passes read that
+            # rectangle back from the plan rather than re-guessing it.
+            "crop_factor": float(factor),
         },
         # What the match frame measured, kept so a later pass can rebuild one subject's
         # pick payload without re-detecting anything or loading the still again.

@@ -52,8 +52,15 @@ MAX_SUBJECT_CHOICES = 64
 
 CATEGORY = "MiniMax H3/Face Refine"
 
-# The pack's own tracker defaults, quoted so the report can name the cost of a job before
-# any pass has picked a size. `H3FaceTrackCrop` ships crop_factor 2.5 and a 768x768 canvas.
+# The pack's own tracker defaults. `H3FaceTrackCrop` ships crop_factor 2.5 and a 768x768 canvas.
+#
+# The CANVAS is only ever quoted as an estimate in the report: it is set on the tracker, on
+# widgets this node cannot see, and it can switch to auto - so the report says which default it
+# is standing on instead of reading like a measurement of the job.
+#
+# The CROP FACTOR is different: this node cuts the subject references, so it has to be asked for
+# the factor (the `crop_factor` widget) and the plan records it. A reference cut at a factor the
+# tracker will not use is a mis-framed reference.
 DEFAULT_CROP_FACTOR = plan_store.DEFAULT_CROP_FACTOR
 DEFAULT_CANVAS = (768, 768)
 
@@ -231,6 +238,7 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
     run the job at all, so they lead.
     """
     canvas_w, canvas_h = DEFAULT_CANVAS
+    factor = plan_store.plan_crop_factor(plan)
     tw, th = plan["inputs"]["target_size"]
     sw, sh = plan["inputs"]["still_size"]
     scale = float(plan["scale"])
@@ -240,11 +248,20 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
                              f"   match frame {plan['match_frame']}"),
         _line("reference still", f"{sw}x{sh}   still -> clip scale {scale:.3f}"
                                  f"   (1 clip px = {1.0 / scale:.3f} still px)"),
-        _line("cost", f"{plan['subject_count']} subject(s) x {frames} frame(s)"
-                      f" @ {canvas_w}x{canvas_h}"
-                      f"   = {plan['subject_count'] * frames} frame(s) to generate"),
-        _line("", f"(canvas size is H3 Face Track + Crop's;"
-                  f" crops are {DEFAULT_CROP_FACTOR}x face height)"),
+        # An estimate, and labelled as one: the canvas is H3 Face Track + Crop's, set on that
+        # node, and this node cannot see it. Naming the count is the point; naming a size the
+        # plan never measured as if it had is not.
+        _line("cost (estimate)", f"{plan['subject_count']} subject(s) x {frames} frame(s)"
+                                 f" @ {canvas_w}x{canvas_h}"
+                                 f"   = {plan['subject_count'] * frames} frame(s) to generate"),
+        _line("", f"({canvas_w}x{canvas_h} is H3 Face Track + Crop's crop canvas at its shipped "
+                  f"default - what this job generates at is that node's canvas_width/"
+                  f"canvas_height, or its auto canvas)"),
+        # The one rectangle this node does decide, so it is stated with the number that decided
+        # it: a reference cut at a different factor from the tracker's is a mis-framed reference.
+        _line("crop factor", f"{factor:g}   each subject reference was cut at crop_factor "
+                             f"{factor:g} x face height - it must match the crop_factor H3 Face "
+                             f"Track + Crop uses for this job"),
         _line("pairing", f"{plan['inputs']['subject_source']}"
                          f"   tolerance {plan['inputs']['match_tolerance']:.3f}"
                          f" = {plan['tolerance_px']:.0f}px of the {tw}x{th} diagonal"
@@ -388,6 +405,24 @@ class H3MultiFacePlan:
                                "still. Conditioning is whole-frame, so H3 chooses which face in "
                                "the still it applies - not a guarantee the right face is used.\n"
                                "A face that did find its partner is unaffected by this."}),
+                # crop_factor (#11 review) is the LAST entry: it is the newest widget, and ComfyUI
+                # replays saved graphs by position (ADR 0002), so everything older stays exactly
+                # where it was. It is a widget on this node only because the subject reference has
+                # to be cut with the tracker's rectangle; the plan still owns the geometry.
+                "crop_factor": ("FLOAT", {
+                    "default": DEFAULT_CROP_FACTOR, "min": 1.2, "max": 8.0, "step": 0.1,
+                    "tooltip": "Set this to the crop_factor that H3 Face Track + Crop will use "
+                               "for THIS job - the same number, on that node.\n\n"
+                               "Each subject reference is cut with the rectangle that factor "
+                               "gives: crop_factor x face height, centred on the face, scaled "
+                               "into the reference still at its native resolution. Left at a "
+                               "different number from the tracker's, EVERY subject reference in "
+                               "the job is mis-framed - the detail H3 is handed sits somewhere "
+                               "else in the crop than the face it belongs to.\n\n"
+                               "Recorded in plan.json, so the overlap warnings, the pairing "
+                               "preview and a resumed job all measure the crops this job really "
+                               "cuts. It joins the pairing fingerprint, because the references "
+                               "already in the job folder were cut at the old number."}),
             },
         }
 
@@ -404,7 +439,8 @@ class H3MultiFacePlan:
 
     def run(self, images, reference_still, detector, confidence, match_frame,
             subject_source, match_tolerance, excluded_faces, max_subjects, job_name,
-            unmatched_faces=plan_store.DEFAULT_UNMATCHED_FACES):
+            unmatched_faces=plan_store.DEFAULT_UNMATCHED_FACES,
+            crop_factor=DEFAULT_CROP_FACTOR):
         import folder_paths
         from .nodes import _load_detector, _to_bgr_u8
 
@@ -464,7 +500,7 @@ class H3MultiFacePlan:
             (width, height), (int(still.shape[1]), int(still.shape[0])),
             frame, str(subject_source), float(match_tolerance),
             plan_store.parse_excluded_faces(excluded_faces), int(max_subjects),
-            str(unmatched_faces))
+            str(unmatched_faces), float(crop_factor))
         if not plan["subjects"]:
             if plan["excluded_faces"]:
                 raise ValueError(

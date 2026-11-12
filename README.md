@@ -53,7 +53,10 @@ behaves exactly as it did (ADR 0002).
 **The cost, stated up front: one generation per subject.** A job with three subjects costs three
 H3 renders of the whole clip, not one. The plan node prints that number before you queue —
 `2 subject(s) x 4 frame(s) @ 768x768 = 8 frame(s) to generate` — so the cost is a decision you make
-looking at the graph, not a surprise an hour in.
+looking at the graph, not a surprise an hour in. The size on that line is an **estimate**: the crop
+canvas belongs to [H3 Face Track + Crop](#h3-face-track--crop), which sets it on its own widgets and
+can switch it to `auto`. The one size this node does decide is the **subject reference** crop, and it
+says which `crop_factor` it cut those references with.
 
 **Why one pass per subject:** H3's conditioning is **whole-frame**, not per face. A subject
 reference does not travel with the face it came from; it conditions the whole generated frame.
@@ -1029,6 +1032,7 @@ subject, so it has to be visible at the node that made it.
 | `max_subjects` | `0` | `0` = no cap. A cap is a **loud** truncation: it applies after the faces are ordered and after `unmatched_faces` has had its say, every dropped face is named in the report with its position at the match frame, and the number the cap saves is printed beside the number it spends. It also joins the **pairing fingerprint**, because a cap changes who the subjects are. |
 | `job_name` | empty | The **job folder** under ComfyUI's output folder. Left blank it is named after the clip. **Keep the same name to resume a job** — change it, or change any input the fingerprint tracks, and the nodes refuse rather than mixing two pairings into one clip. |
 | `unmatched_faces` | `leave` | What becomes of an **unpaired face** — a face on one plate with no partner on the other. It decides the **subject set**, so it lives here rather than on the pass nodes, and it is recorded in `plan.json`. See [`unmatched_faces`](#unmatched_faces-three-answers). |
+| `crop_factor` | `2.5` | The crop factor **H3 Face Track + Crop** will use for this job. Set it to that node's `crop_factor`, and to nothing else: each **subject reference** is cut with the rectangle that factor gives — crop_factor × face height, centred on the face, mapped into the **reference still** at its native resolution. A number that differs from the tracker's mis-frames every reference in the job, so it is recorded in `plan.json` (the overlap warnings, the pairing preview and a resumed job all read it back from there) and it joins the **pairing fingerprint**. |
 
 **Outputs**
 
@@ -1050,8 +1054,9 @@ A two-subject job — three faces found on the clip, two on the still, `max_subj
 job             shot 07
 target clip     1000x1000   4 frame(s)   match frame 2
 reference still 2000x2000   still -> clip scale 0.500   (1 clip px = 2.000 still px)
-cost            2 subject(s) x 4 frame(s) @ 768x768   = 8 frame(s) to generate
-                (canvas size is H3 Face Track + Crop's; crops are 2.5x face height)
+cost (estimate) 2 subject(s) x 4 frame(s) @ 768x768   = 8 frame(s) to generate
+                (768x768 is H3 Face Track + Crop's crop canvas at its shipped default - what this job generates at is that node's canvas_width/canvas_height, or its auto canvas)
+crop factor     2.5   each subject reference was cut at crop_factor 2.5 x face height - it must match the crop_factor H3 Face Track + Crop uses for this job
 pairing         union   tolerance 0.050 = 71px of the 1000x1000 diagonal   2 of 3 clip face(s) paired
 excluded        none
 max_subjects    2
@@ -1067,7 +1072,8 @@ notes
                 - plan: <output>/shot 07/plan.json
 ```
 
-`cost`, `pairing` and the one line per **subject** are what to read before queueing: how many
+`cost (estimate)`, `crop factor`, `pairing` and the one line per **subject** are what to read before
+queueing: how many
 renders this job is, whether the pairing actually found the people you can see, and who each render
 will be about. The `unmatched` line counts what the plan decided about faces that found no partner;
 the `capped` line appears only when `max_subjects` cut someone.

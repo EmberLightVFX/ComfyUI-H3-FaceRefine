@@ -226,23 +226,29 @@ def test_no_cap_into_a_no_cap_folder_is_a_resume(tmp_path):
 # --- the plan format version -----------------------------------------------------------------
 
 def test_a_new_plan_is_written_at_the_current_version():
-    assert ps.PLAN_VERSION == 2
+    assert ps.PLAN_VERSION == 3
     assert _plan()["version"] == ps.PLAN_VERSION
+    # Every version a job folder might have been written with stays readable, so an
+    # interrupted job survives a pack update rather than being refused for its version number.
+    assert ps.PLAN_READABLE_VERSIONS == (1, 2, ps.PLAN_VERSION)
 
 
 def test_a_folder_written_with_the_previous_version_is_read_not_rejected(tmp_path):
-    """The honest rule: version 1 is understood, not migrated. Version 1 already recorded
-    max_subjects, so the fingerprint - not the version number - is what refuses a genuinely
-    different job."""
+    """The honest rule: an old version is understood, not migrated. Version 1 already recorded
+    max_subjects and version 2 already cut its references at the tracker's shipped default, so
+    the fingerprint - not the version number - is what refuses a genuinely different job."""
     stored = _plan()
-    stored["version"] = 1
+    stored["version"] = 2
+    del stored["inputs"]["crop_factor"]       # version 2 recorded no crop factor at all
     job = ps.job_dir_for(tmp_path, "group shot")
     ps.write_plan(job, stored)
 
     back = ps.read_plan(job)
-    assert back["version"] == 1
+    assert back["version"] == 2
     note = ps.plan_version_note(back)
-    assert note and "version 1" in note and "version 2" in note
+    assert note and "version 2" in note and f"version {ps.PLAN_VERSION}" in note
+    # The factor a version 2 folder never recorded is read back as the default it used.
+    assert ps.plan_crop_factor(back) == ps.DEFAULT_CROP_FACTOR
 
 
 def test_the_current_version_gets_no_version_note(tmp_path):

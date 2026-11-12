@@ -330,7 +330,9 @@ def test_the_plan_carries_a_version_and_the_pairing_inputs():
                               "match_frame": 12, "subject_source": "union",
                               "match_tolerance": 0.05, "excluded_faces": [1],
                               "max_subjects": 4,
-                              "unmatched_faces": ps.DEFAULT_UNMATCHED_FACES}
+                              "unmatched_faces": ps.DEFAULT_UNMATCHED_FACES,
+                              # The rectangle the subject references were cut with (#11 review).
+                              "crop_factor": ps.DEFAULT_CROP_FACTOR}
     assert plan["scale"] == pytest.approx(0.5)
     # The match-frame measurements stay in the plan so a later pass can rebuild one
     # subject's pick without re-detecting anything.
@@ -418,4 +420,38 @@ def test_a_plan_folder_is_not_forgotten_when_the_inputs_change(tmp_path):
     assert back["inputs"]["match_tolerance"] == 0.11
     assert back["inputs"]["subject_source"] == "target_clip"
     assert back["inputs"]["max_subjects"] == 3
+
+
+# --- the tracker's crop_factor, asked of the plan (#11 review, P1) --------------------
+
+def test_the_plan_cuts_subject_references_at_the_crop_factor_it_is_given():
+    """The tracker takes `crop_factor` from a widget, so the plan cannot assume 2.5: a subject
+    reference framed at the wrong factor puts the detail it carries somewhere else in the crop."""
+    default = _plan()
+    tight = _plan(crop_factor=1.5)
+
+    # clip face 0 is 120px tall: at 1.5 that is an 180px square centred on (150, 160), where
+    # the shipped default gives a 300px square pushed up against the frame's top-left.
+    assert ps.subject_crop_rect(default, default["subjects"][0]) == [0.0, 10.0, 300.0, 300.0]
+    assert ps.subject_crop_rect(tight, tight["subjects"][0]) == [60.0, 70.0, 180.0, 180.0]
+    assert default["subjects"][0]["ref_crop"] == [0, 20, 600, 600]
+    assert tight["subjects"][0]["ref_crop"] == [120, 140, 360, 360]
+    # The factor is recorded in the plan, so the passes and the preview read the rectangle
+    # back out of the job rather than re-guessing it.
+    assert tight["inputs"]["crop_factor"] == 1.5
+    assert default["inputs"]["crop_factor"] == ps.DEFAULT_CROP_FACTOR
+
+
+def test_a_plan_without_the_new_argument_is_todays_plan_byte_for_byte():
+    """The default is the tracker's shipped default, so nothing that exists today moves."""
+    assert json.dumps(_plan(), sort_keys=True, default=str) == json.dumps(
+        _plan(crop_factor=ps.DEFAULT_CROP_FACTOR), sort_keys=True, default=str)
+    assert _plan()["subjects"][0]["ref_crop"] == [0, 20, 600, 600]
+
+
+def test_a_crop_factor_that_cannot_crop_anything_is_refused():
+    """A factor below 1 is smaller than the face, which is not a crop the tracker could make."""
+    with pytest.raises(ValueError) as exc:
+        _plan(crop_factor=0.0)
+    assert "crop_factor" in str(exc.value)
 
