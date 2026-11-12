@@ -15,11 +15,13 @@ stated rather than hidden.
 import ast
 import json
 import pathlib
+import re
 
 import multi_face_nodes as m
 
 PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
 README = (PACK_ROOT / "README.md").read_text(encoding="utf-8")
+AGENTS = (PACK_ROOT / "AGENTS.md").read_text(encoding="utf-8")
 EXAMPLE_DIR = PACK_ROOT / "example_workflows"
 
 # The five nodes this feature added. Each one has to be documented, and every one of its inputs
@@ -159,3 +161,32 @@ def test_the_pack_version_has_a_whats_new_entry():
     version = [line.split("=")[1].strip().strip('"')
                for line in text.splitlines() if line.startswith("version =")][0]
     assert f"## What's new in {version}" in README, version
+
+
+# ------------------------------------------------------------------------ AGENTS.md
+#
+# The same drift that left a node undocumented left the agent-facing doc describing a pack that
+# no longer exists - "no test suite" over a filling tests/, a node count that stopped being the
+# pack's. These two check the doc against counts read from the repository, never against numbers
+# written down by hand, so the guard itself cannot go stale.
+
+def test_agents_md_admits_the_pack_has_a_test_suite():
+    """A doc that denies its own suite is worse than no doc: an agent who believes it writes no
+    test for the change they were just sent to make."""
+    test_files = sorted(path.name for path in (PACK_ROOT / "tests").glob("test_*.py"))
+    assert test_files, "tests/ holds no test files, so a doc saying so would be accurate"
+    assert "no test suite" not in AGENTS.lower(), \
+        f"AGENTS.md denies the suite while tests/ holds {len(test_files)} test files"
+
+
+def test_agents_md_does_not_undercount_the_nodes_it_describes():
+    """The pack registers more node classes than the frozen `nodes.py` holds, so a doc that
+    describes the released count as the pack's count sends an agent looking in the wrong module."""
+    total = len(registered_nodes())
+    released = len(_registered("nodes.py"))
+    assert total > released, f"nothing beyond the released {released} to guard against"
+    assert f"{released} node classes" not in AGENTS, \
+        f"AGENTS.md calls the released {released} the whole pack; it registers {total}"
+    for claim in re.finditer(r"(\d+)\s+node classes?", AGENTS):
+        assert int(claim.group(1)) == total, \
+            f"AGENTS.md claims {claim.group(0)!r}; the pack registers {total}"
