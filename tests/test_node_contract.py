@@ -148,6 +148,80 @@ def test_the_subject_run_takes_its_inputs_in_schema_order():
     assert args == list(schema["required"])
 
 
+PASS_SAVE_ORDER = ["subject", "stage", "images"]
+PASS_LOAD_ORDER = ["subject", "stream"]
+
+
+def test_the_pass_nodes_are_registered_in_their_own_module():
+    assert m.NODE_CLASS_MAPPINGS["H3PassSave"] is m.H3PassSave
+    assert m.NODE_CLASS_MAPPINGS["H3PassLoad"] is m.H3PassLoad
+    assert m.NODE_DISPLAY_NAME_MAPPINGS["H3PassSave"] == "H3 Pass Save"
+    assert m.NODE_DISPLAY_NAME_MAPPINGS["H3PassLoad"] == "H3 Pass Load"
+
+
+def test_the_pass_nodes_reuse_the_released_types_rather_than_inventing_new_ones():
+    """ADR 0005: a checkpoint is the same IMAGE batch and the same H3FACEXFORM a pass already
+    carries. A third type would fork the pipeline."""
+    save = m.H3PassSave
+    assert save.RETURN_TYPES == ("IMAGE", "STRING", "INT", "INT")
+    assert save.RETURN_NAMES == ("images", "report", "subject_index", "pass_complete")
+    assert save.FUNCTION == "run"
+    assert save.CATEGORY == m.CATEGORY
+    load = m.H3PassLoad
+    assert load.RETURN_TYPES == ("IMAGE", "H3FACEXFORM", "STRING")
+    assert load.RETURN_NAMES == ("images", "transform", "report")
+    assert load.FUNCTION == "run"
+    assert load.CATEGORY == m.CATEGORY
+    for node in (save, load):
+        assert len(node.RETURN_TYPES) == len(node.RETURN_NAMES)
+
+
+def test_the_pass_save_inputs_and_widgets_are_in_this_exact_order():
+    schema = m.H3PassSave.INPUT_TYPES()
+    assert list(schema["required"]) == ["plan"] + PASS_SAVE_ORDER
+    assert list(schema["optional"]) == ["transform"]
+    assert schema["required"]["plan"][0] == m.H3FACEPLAN
+    assert schema["required"]["images"][0] == "IMAGE"
+    assert schema["optional"]["transform"][0] == "H3FACEXFORM"
+    assert schema["required"]["subject"][0] == "INT"
+    assert list(schema["required"]["stage"][0]) == list(ps.PASS_STAGES)
+    assert schema["required"]["stage"][1]["default"] == "crops"
+
+
+def test_the_pass_load_inputs_and_widgets_are_in_this_exact_order():
+    schema = m.H3PassLoad.INPUT_TYPES()
+    assert list(schema["required"]) == ["plan"] + PASS_LOAD_ORDER
+    assert not schema.get("optional")
+    assert schema["plan"][0] == m.H3FACEPLAN
+    assert schema["subject"][0] == "INT"
+    assert list(schema["stream"][0]) == list(ps.PASS_STAGES)
+    assert schema["stream"][1]["default"] == "crops"
+
+
+def test_the_pass_widgets_are_a_number_then_the_stage_and_crops_is_first():
+    """`crops` first: it is the stage that gets written, and the one that answers "what did H3
+    actually see". `stitched` completes a pass, and that is decided in `plan_store`, not here."""
+    save = m.H3PassSave.INPUT_TYPES()["required"]
+    assert list(save["stage"][0])[0] == "crops"
+    assert list(save["stage"][0]) == ["crops", "stitched"]
+    assert save["subject"][1]["default"] == 0
+
+
+def test_the_pass_nodes_take_their_inputs_in_schema_order():
+    for node in (m.H3PassSave, m.H3PassLoad):
+        schema = node.INPUT_TYPES()
+        wanted = list(schema["required"]) + list(schema.get("optional") or {})
+        args = [p for p in inspect.signature(node.run).parameters if p != "self"]
+        assert args == wanted, node.__name__
+
+
+def test_the_stage_vocabulary_is_the_plan_module_s_and_stitched_is_the_completing_one():
+    """The manifest rule lives in one place: Pass Save and Pass Load ask `plan_store` for the
+    stages and for what makes a pass complete, they never decide it themselves."""
+    assert ps.PASS_STAGES == ("crops", "stitched")
+    assert "stitched" in ps.PASS_STAGES
+
+
 def _module_level_imports(path) -> set[str]:
     """Absolute top-level module names imported outside any function or class.
 
