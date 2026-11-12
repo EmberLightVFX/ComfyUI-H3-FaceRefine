@@ -247,22 +247,35 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
                                            f" (recorded in the plan; the passes act"
                                            f" on it)"))
 
+    counts = plan_store.subject_kind_counts(plan)
+    lines.append(_line(
+        "unmatched",
+        f"{plan['inputs'].get('unmatched_faces', plan_store.DEFAULT_UNMATCHED_FACES)}   "
+        f"{counts[plan_store.KIND_PAIRED]} paired"
+        f"   {counts[plan_store.KIND_NO_REFERENCE]} subject(s) with no reference"
+        f"   {counts[plan_store.KIND_WHOLE_STILL]} subject(s) on the whole still"
+        f"   {counts[plan_store.KIND_LEFT_OUT]} face(s) left out"))
+
     for subject in plan["subjects"]:
         where = (f"clip face {subject['clip_face']}" if subject["clip_face"] is not None
                  else "not seen in the clip on this frame")
-        if subject["has_reference"]:
-            crop = subject["ref_crop"]
+        crop = subject["ref_crop"]
+        if subject.get("ref_kind") == plan_store.REF_STILL:
+            ref = (f"reference is the WHOLE reference still, {crop[2]}x{crop[3]}px"
+                   f" -> {subject['ref_file']}   whole-frame conditioning: H3 picks which face"
+                   f" in it to apply")
+        elif subject["has_reference"]:
             ref = (f"reference from still face {subject['still_face']},"
                    f" {crop[2]}x{crop[3]}px at the still's native resolution"
                    f" -> {subject['ref_file']}")
         else:
-            ref = ("NO subject reference - refine it without one, or fix the pairing"
-                   " and re-run this node")
+            ref = ("NO subject reference - this pass runs with nothing wired into H3's"
+                   " reference slots, so it is weaker than a paired subject")
         lines.append(_line(f"subject {subject['index']}", where + "   " + ref))
 
     lines.append(_line("written", job_dir))
     lines.append(_line("", f"{plan_store.PLAN_FILENAME} + {refs} subject reference"
-                           f" crop(s)"))
+                           f" file(s)"))
     if notes:
         lines.append(_line("notes", ""))
         lines.extend(_line("", f"- {note}") for note in notes)
@@ -337,6 +350,23 @@ class H3MultiFacePlan:
                     "tooltip": "The job folder under ComfyUI's output folder, holding the plan "
                                "and every subject reference crop. Left blank it is named "
                                "after the clip. Keep the same name to resume a job."}),
+                "unmatched_faces": (list(plan_store.UNMATCHED_FACES), {
+                    "default": plan_store.DEFAULT_UNMATCHED_FACES,
+                    "tooltip": "What becomes of a face on the target clip that found no "
+                               "matching face in the reference still. This decides the SUBJECT "
+                               "SET, so it is recorded in plan.json and the pairing fingerprint "
+                               "refuses to mix two answers into one job folder.\n"
+                               "leave (default): do not make a subject of it at all - no pass "
+                               "ever touches it, so it keeps its original pixels. Not a "
+                               "failure: the safe default when the pairing might be wrong.\n"
+                               "no_reference: a subject with no subject reference. Its pass "
+                               "runs with nothing wired into H3's reference slots, which the "
+                               "slots allow; the refinement is identity and quality driven and "
+                               "comes out weaker than a paired subject.\n"
+                               "with_still: a subject whose reference is the WHOLE reference "
+                               "still. Conditioning is whole-frame, so H3 chooses which face in "
+                               "the still it applies - not a guarantee the right face is used.\n"
+                               "A face that did find its partner is unaffected by this."}),
             },
         }
 
@@ -352,7 +382,8 @@ class H3MultiFacePlan:
     CATEGORY = CATEGORY
 
     def run(self, images, reference_still, detector, confidence, match_frame,
-            subject_source, match_tolerance, excluded_faces, max_subjects, job_name):
+            subject_source, match_tolerance, excluded_faces, max_subjects, job_name,
+            unmatched_faces=plan_store.DEFAULT_UNMATCHED_FACES):
         import folder_paths
         from .nodes import _load_detector, _to_bgr_u8
 
@@ -411,13 +442,24 @@ class H3MultiFacePlan:
             clip_boxes, clip_confs, still_boxes, still_confs,
             (width, height), (int(still.shape[1]), int(still.shape[0])),
             frame, str(subject_source), float(match_tolerance),
-            plan_store.parse_excluded_faces(excluded_faces), int(max_subjects))
+            plan_store.parse_excluded_faces(excluded_faces), int(max_subjects),
+            str(unmatched_faces))
         if not plan["subjects"]:
             if plan["excluded_faces"]:
                 raise ValueError(
                     f"nothing to plan: every face found on frame {frame} is named in "
                     f"excluded_faces ({', '.join(str(i) for i in plan['excluded_faces'])}). "
                     f"Clear the numbers that are not bystanders.")
+            if plan["left_out"]:
+                # `leave` spent the whole job. Empty is not an answer anyone wants to queue,
+                # and the two modes that would make somebody of these faces are named.
+                raise ValueError(
+                    f"nothing to plan: unmatched_faces={unmatched_faces} left all "
+                    f"{len(plan['left_out'])} face(s) found on frame {frame} out of the subject "
+                    f"set, because none of them found a partner in the reference still. Use "
+                    f"unmatched_faces=no_reference to refine them from the clip alone, or "
+                    f"with_still to condition them on the whole still - or check that "
+                    f"reference_still is framed like this frame of the clip.")
             raise ValueError(
                 f"nothing to plan: subject_source={subject_source} seeds its subjects from a "
                 f"plate holding no faces on frame {frame}. Use union, or lower confidence.")
@@ -444,6 +486,10 @@ class H3MultiFacePlan:
         # with neither plate loaded again.
         refs = 0
         for subject in plan["subjects"]:
+            # A `crop` reference is a cut of the still and a `still` reference (#8,
+            # unmatched_faces=with_still) is all of it; either way it goes out through the same
+            # writer, under the same subject_N.png name, so a later pass reads the two the same
+            # way and never loads the still again.
             if subject["ref_crop"]:
                 file_name = f"subject_{int(subject['index'])}.png"
                 _write_reference_png(os.path.join(job, file_name), still,
@@ -456,12 +502,9 @@ class H3MultiFacePlan:
                                        or None)}
         written = plan_store.write_plan(job, plan)
 
-        unreference = [int(s["index"]) for s in plan["subjects"] if not s["has_reference"]]
-        if unreference:
-            notes.append(
-                f"subject(s) {', '.join(str(i) for i in unreference)} have no face in the "
-                f"reference still, so no subject reference: a pass for them either runs "
-                f"without a reference or they keep their original pixels")
+        # #8: what the plan decided about faces that found no partner, in the plan module's own
+        # words - `leave` names every face it left out and says that leaving is not a failure.
+        notes.extend(plan_store.unmatched_lines(plan))
         unseeded = [int(j) for j in plan["unpaired_still"]
                     if not any(s["still_face"] == j for s in plan["subjects"])]
         if unseeded:
@@ -486,8 +529,12 @@ def subject_label(subject) -> str:
     clip_face = subject.get("clip_face")
     still_face = subject.get("still_face")
     where = f"clip face {clip_face}" if clip_face is not None else "not seen in the clip"
-    ref = (f"still face {still_face}" if still_face is not None
-           else "no subject reference")
+    if still_face is not None:
+        ref = f"still face {still_face}"
+    elif subject.get("ref_kind") == plan_store.REF_STILL:
+        ref = "the whole reference still"      # unmatched_faces=with_still (#8)
+    else:
+        ref = "no subject reference"
     return f"{index}: {where} -> {ref}"
 
 
@@ -758,8 +805,15 @@ def subject_report(plan, subject, narrowed, job_dir=None, reference_note: str = 
     except (IndexError, TypeError, ValueError):
         on_match = 0
 
-    pairing = (f"still face {subject['still_face']} (paired)" if paired
-               else "no subject reference (unpaired)")
+    if paired:
+        pairing = f"still face {subject['still_face']} (paired)"
+    elif subject.get("ref_kind") == plan_store.REF_STILL:
+        # #8: this subject has a reference - the whole still - so saying they have none would be
+        # wrong, and the cost of that reference belongs where the pass is being read.
+        pairing = ("the whole reference still (unpaired - whole-frame conditioning, so H3 "
+                   "chooses which face in it to apply)")
+    else:
+        pairing = "no subject reference (unpaired)"
     lines = [
         _line("chosen", f"subject {subject['index']} of {len(subjects)}   "
                         f"clip face {subject.get('clip_face')}   ->   {pairing}"),
@@ -851,9 +905,12 @@ def load_subject_reference(job_dir, subject):
     """
     name = (subject or {}).get("ref_file")
     index = (subject or {}).get("index")
+    kind = (subject or {}).get("ref_kind")
     if not name:
-        return None, 0, (f"subject {index} has no subject reference: no face in the "
-                         f"reference still paired with this clip face, so this pass runs "
+        why = ("unmatched_faces made them a subject without one"
+               if kind == plan_store.REF_NONE else
+               "no face in the reference still paired with this clip face")
+        return None, 0, (f"subject {index} has no subject reference: {why}, so this pass runs "
                          f"with nothing wired into H3's reference slots")
     if not job_dir:
         return None, 0, (f"the plan records no job folder, so {name} cannot be read: run "
@@ -864,9 +921,16 @@ def load_subject_reference(job_dir, subject):
                          f"on disk, so this pass runs with nothing wired into H3's reference "
                          f"slots")
     reference = _read_reference_png(path)
+    size = f"{int(reference.shape[2])}x{int(reference.shape[1])}px"
+    if kind == plan_store.REF_STILL:
+        # The whole still went in, so the whole still comes back out (#8): same file
+        # convention, same read path, whole-frame conditioning instead of a face.
+        return (reference, 1,
+                f"{name}   the WHOLE reference still, {size}, read from the job folder - the "
+                f"conditioning is whole-frame, so H3 chooses which face in it to apply")
     return (reference, 1,
-            f"{name}   {int(reference.shape[2])}x{int(reference.shape[1])}px, read from the "
-            f"job folder - the reference still is not loaded again")
+            f"{name}   {size}, read from the job folder - the reference still is not loaded "
+            f"again")
 
 
 class H3SubjectSelect:

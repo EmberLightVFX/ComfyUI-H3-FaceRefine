@@ -107,7 +107,7 @@ def pack(tmp_path, monkeypatch):
 
 
 def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
-         excluded="", job_name="group shot", source="union"):
+         excluded="", job_name="group shot", source="union", mode="leave"):
     fake = _FakeModel([_Found(CLIP_BOXES, CLIP_CONFS), _Found(still_boxes, STILL_CONFS)])
     monkeypatch.setattr(pack.nodes, "_load_detector", lambda name: fake)
     node = pack.NODE_CLASS_MAPPINGS["H3MultiFacePlan"]()
@@ -115,19 +115,26 @@ def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
     images.h3_video_name = "shot_07.mp4"
     still = torch.zeros((1, int(still_size[1]), int(still_size[0]), 3))
     return node.run(images, still, "face_yolov8m.pt", 0.35, 2, source, 0.05, excluded,
-                    0, job_name)
+                    0, job_name, mode)
 
 
 def test_the_plan_node_plans_pairs_and_reports(pack, monkeypatch):
+    """The shipped default is `leave`, so the middle face - detected on the clip, never found in
+    the still - is not made a subject at all, and says so in the report."""
     plan, preview, report, count = _run(pack, monkeypatch)
 
-    assert count == 3 == plan["subject_count"]
-    assert [(s["clip_face"], s["still_face"]) for s in plan["subjects"]] == [
-        (0, 0), (1, None), (2, 1)]
+    assert count == 2 == plan["subject_count"]
+    assert [(s["clip_face"], s["still_face"]) for s in plan["subjects"]] == [(0, 0), (2, 1)]
+    assert [s["index"] for s in plan["subjects"]] == [0, 1]
+    assert [[s["clip_face"] for s in plan["left_out"]]] == [[1]]
     # The three numbers that decide whether the job is worth queuing.
-    assert "3 subject(s) x 4 frame(s) @ 768x768" in report
+    assert "2 subject(s) x 4 frame(s) @ 768x768" in report
     assert "still -> clip scale 0.500" in report
     assert "match frame 2" in report
+    # Leaving is said plainly, and named, rather than left to be noticed in the finished clip.
+    assert "unmatched_faces=leave" in report
+    assert "clip face 1" in report
+    assert "not a failure" in report
     # The preview is both plates side by side, one image, both at the clip's height.
     assert preview.dim() == 4 and preview.shape[0] == 1 and preview.shape[1] == 1000
     assert preview.shape[2] > 2000
@@ -140,17 +147,18 @@ def test_the_plan_and_the_subject_references_land_in_the_job_folder(pack, monkey
 
     assert (job / "plan.json").is_file()
     assert (job / "subject_0.png").is_file()
-    assert (job / "subject_2.png").is_file()
-    # The middle face found no partner, so there is no crop of it to write.
-    assert not (job / "subject_1.png").exists()
-    assert [s["ref_file"] for s in plan["subjects"]] == ["subject_0.png", None,
-                                                        "subject_2.png"]
+    assert (job / "subject_1.png").is_file()
+    # The left-out face is not a subject, so nothing is numbered after it: the subject set is
+    # contiguous, which is what the passes, the manifest and the composite all count on.
+    assert not (job / "subject_2.png").exists()
+    assert [s["ref_file"] for s in plan["subjects"]] == ["subject_0.png", "subject_1.png"]
 
     with open(job / "plan.json", encoding="utf-8") as fh:
         written = json.load(fh)
     assert written == plan
     assert written["version"]
     assert written["run"]["job_name"] == "group shot"
+    assert written["inputs"]["unmatched_faces"] == "leave"
     assert str(job) in report
 
     # Cut at the still's own pixels - 2x the clip's crop, not resampled to it.
@@ -189,4 +197,106 @@ def test_a_still_of_the_same_size_as_the_clip_pairs_and_previews_without_resizin
     assert plan["scale"] == pytest.approx(1.0)
     assert "still -> clip scale 1.000" in report
     assert preview.dim() == 4 and preview.shape[1] == 1000
+
+
+# --- unmatched_faces: the three ways to handle a face with no partner (#8) ------------------
+
+def test_with_still_writes_that_subject_s_reference_as_the_whole_still(pack, monkeypatch,
+                                                                       tmp_path):
+    """No crop for a face the still never resolved: the whole still goes in as its reference,
+    written the same way a paired crop is and at the still's full size, not a crop's."""
+    plan, _, report, count = _run(pack, monkeypatch, mode="with_still", job_name="whole still")
+    job = tmp_path / "output" / "whole still"
+
+    assert count == 3
+    subject = [s for s in plan["subjects"] if s["clip_face"] == 1][0]
+    assert subject["ref_kind"] == "still"
+    assert subject["ref_crop"] == [0, 0, 2000, 2000]
+    assert subject["has_reference"] is True
+    assert (job / "subject_1.png").is_file()
+    assert subject["ref_file"] == "subject_1.png"
+
+    from PIL import Image
+    with Image.open(job / "subject_1.png") as written:
+        # The full still, at its own pixels - not the crop that could not be cut.
+        assert written.size == (2000, 2000)
+    # The paired subject is untouched by the mode: still a 600x600 crop out of the still.
+    with Image.open(job / "subject_0.png") as crop:
+        assert crop.size == (600, 600)
+
+    # And the report warns about what whole-frame conditioning costs.
+    assert "whole reference still" in report
+    assert "whole-frame" in report
+    assert "not a guarantee" in report
+
+
+def test_no_reference_makes_a_subject_of_it_and_writes_no_reference_file(pack, monkeypatch,
+                                                                        tmp_path):
+    plan, _, report, count = _run(pack, monkeypatch, mode="no_reference", job_name="no ref")
+    job = tmp_path / "output" / "no ref"
+
+    assert count == 3
+    subject = [s for s in plan["subjects"] if s["clip_face"] == 1][0]
+    assert subject["has_reference"] is False
+    assert subject["ref_kind"] == "none"
+    assert subject["ref_file"] is None
+    assert not (job / "subject_1.png").exists()
+    assert "nothing wired into H3's reference slots" in report
+    assert "weaker" in report
+
+
+def test_leave_with_nobody_paired_refuses_and_names_the_widget_that_fixes_it(pack, monkeypatch):
+    """Every face is unpaired, so `leave` would plan an empty job. That is a refusal, not a
+    silently empty clip: the message names the two modes that would make somebody of them."""
+    with pytest.raises(ValueError) as exc:
+        _run(pack, monkeypatch, still_boxes=[], job_name="no partners")
+
+    text = str(exc.value)
+    assert "unmatched_faces" in text
+    assert "no_reference" in text and "with_still" in text
+
+
+def test_changing_the_mode_against_an_existing_job_folder_refuses(pack, monkeypatch):
+    """Same plates, same faces, same everything but the mode - and the mode decided who the
+    subjects are, so the passes already in that folder are a different job's."""
+    _run(pack, monkeypatch, mode="no_reference", job_name="mode switch")
+    with pytest.raises(ValueError) as exc:
+        _run(pack, monkeypatch, mode="with_still", job_name="mode switch")
+
+    text = str(exc.value)
+    assert "unmatched_faces" in text
+    assert "no_reference" in text and "with_still" in text
+
+
+def test_the_reference_reader_hands_back_the_whole_still_for_a_whole_still_subject(pack,
+                                                                                  monkeypatch,
+                                                                                  tmp_path):
+    """Subject Select's existing reference loading, unchanged and with no new widget: a whole
+    still goes in, so a whole still comes back out, at its own size, and the note says what it
+    is rather than describing a crop."""
+    plan, _, _, _ = _run(pack, monkeypatch, mode="with_still", job_name="whole still sel")
+    subject = [s for s in plan["subjects"] if s["ref_kind"] == "still"][0]
+
+    reference, exists, note = pack.multi_face_nodes.load_subject_reference(
+        str(tmp_path / "output" / "whole still sel"), subject)
+
+    assert exists == 1 and reference is not None
+    assert tuple(reference.shape) == (1, 2000, 2000, 3)
+    assert "WHOLE reference still" in note
+    assert "whole-frame" in note
+
+
+def test_the_reference_reader_still_says_so_for_a_no_reference_subject(pack, monkeypatch,
+                                                                      tmp_path):
+    """`none` is still a normal state of a plan: nothing is invented, and the wording names the
+    widget that decided it."""
+    plan, _, _, _ = _run(pack, monkeypatch, mode="no_reference", job_name="no ref sel")
+    subject = [s for s in plan["subjects"] if s["ref_kind"] == "none"][0]
+
+    reference, exists, note = pack.multi_face_nodes.load_subject_reference(
+        str(tmp_path / "output" / "no ref sel"), subject)
+
+    assert reference is None and exists == 0
+    assert "no subject reference" in note
+    assert "unmatched_faces" in note
 

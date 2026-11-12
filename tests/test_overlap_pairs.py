@@ -114,7 +114,8 @@ def test_a_subject_the_clip_never_saw_is_measured_from_the_still_face():
 def test_the_measure_is_the_same_rect_the_plan_cut_the_subject_reference_with():
     """A real plan, not a hand-written one: the crop region is `tracker_rect`'s output."""
     plan = ps.build_subject_plan([FACE, _shifted(150)], [0.9, 0.8], [], [], SIZE, SIZE,
-                                 match_frame=2, subject_source="target_clip")
+                                 match_frame=2, subject_source="target_clip",
+                                 unmatched_faces="no_reference")
     assert ps.plan_subject_indices(plan) == [0, 1]
 
     expected = ps.overlapping_subject_pairs(_plan([FACE, _shifted(150)]), 0.24)

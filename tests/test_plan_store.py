@@ -189,15 +189,17 @@ def _plan(**over):
     args = dict(target_boxes=CLIP_BOXES, target_confs=CLIP_CONFS,
                 still_boxes=STILL_BOXES, still_confs=STILL_CONFS,
                 target_size=CLIP, still_size=STILL, match_frame=12,
-                subject_source="union", tolerance=0.05, excluded=[], max_subjects=0)
+                subject_source="union", tolerance=0.05, excluded=[], max_subjects=0,
+                unmatched_faces=ps.DEFAULT_UNMATCHED_FACES)
     args.update(over)
     return ps.build_subject_plan(**args)
 
 
 def test_union_makes_a_subject_of_every_face_on_either_plate():
-    """The default: nothing that was detected is silently dropped, and every subject says
-    whether it has a subject reference."""
-    plan = _plan()
+    """Nothing that was detected is dropped silently, and every subject says whether it has a
+    subject reference. `unmatched_faces=no_reference` here because the shipped default leaves
+    an unpaired face out of the subject set entirely (#8, test_unmatched_faces.py)."""
+    plan = _plan(unmatched_faces="no_reference")
 
     assert plan["subject_count"] == 3
     assert [s["clip_face"] for s in plan["subjects"]] == [0, 1, 2]
@@ -211,7 +213,7 @@ def test_union_makes_a_subject_of_every_face_on_either_plate():
 def test_subjects_are_ordered_left_to_right_at_the_match_frame():
     """Passes composite in this order, so it is the order the user reads off the preview."""
     plan = _plan(target_boxes=list(reversed(CLIP_BOXES)),
-                 target_confs=list(reversed(CLIP_CONFS)))
+                 target_confs=list(reversed(CLIP_CONFS)), unmatched_faces="no_reference")
 
     # clip_face is the detection order; the SUBJECTS themselves run left to right.
     assert [s["clip_face"] for s in plan["subjects"]] == [2, 1, 0]
@@ -221,7 +223,7 @@ def test_subjects_are_ordered_left_to_right_at_the_match_frame():
 def test_target_clip_source_takes_subjects_from_the_clip_only():
     """When the clip detected better, a face only the still saw does not become a
     subject - there is nothing in the clip to hold it."""
-    plan = _plan(subject_source="target_clip")
+    plan = _plan(subject_source="target_clip", unmatched_faces="no_reference")
 
     assert [s["clip_face"] for s in plan["subjects"]] == [0, 1, 2]
     assert [s["has_reference"] for s in plan["subjects"]] == [True, False, True]
@@ -289,7 +291,7 @@ def test_the_excluded_faces_widget_is_read_as_a_typed_list():
 
 def test_max_subjects_is_recorded_not_applied():
     """The cap travels with the plan; which subjects it cuts is later passes' business."""
-    plan = _plan(max_subjects=2)
+    plan = _plan(max_subjects=2, unmatched_faces="no_reference")
 
     assert plan["subject_count"] == 3
     assert plan["inputs"]["max_subjects"] == 2
@@ -303,8 +305,9 @@ def test_an_unknown_subject_source_is_an_error():
 
 def test_a_subject_reference_is_cut_where_the_clip_crop_would_land():
     """The tracker's framing, in the still's own pixels: for a 2x still that is a 600px cut
-    sitting where the clip's 300px crop sits."""
-    plan = _plan()
+    sitting where the clip's 300px crop sits. `no_reference` keeps the unpaired face in the
+    subject set so this test can see that it has nothing to cut."""
+    plan = _plan(unmatched_faces="no_reference")
 
     assert plan["subjects"][0]["ref_crop"] == [0, 20, 600, 600]
     assert plan["subjects"][2]["ref_crop"] == [1400, 60, 600, 600]
@@ -319,7 +322,8 @@ def test_the_plan_carries_a_version_and_the_pairing_inputs():
     assert plan["inputs"] == {"target_size": [1000, 1000], "still_size": [2000, 2000],
                               "match_frame": 12, "subject_source": "union",
                               "match_tolerance": 0.05, "excluded_faces": [1],
-                              "max_subjects": 4}
+                              "max_subjects": 4,
+                              "unmatched_faces": ps.DEFAULT_UNMATCHED_FACES}
     assert plan["scale"] == pytest.approx(0.5)
     # The match-frame measurements stay in the plan so a later pass can rebuild one
     # subject's pick without re-detecting anything.
@@ -330,12 +334,14 @@ def test_the_plan_carries_a_version_and_the_pairing_inputs():
 
 
 def test_every_subject_carries_what_a_pass_needs():
-    plan = _plan()
+    plan = _plan(unmatched_faces="no_reference")
     want = {"index", "clip_face", "clip_box", "still_face", "still_box",
-            "has_reference", "ref_crop", "paired"}
+            "has_reference", "ref_crop", "ref_kind", "ref_file", "paired"}
     for subject in plan["subjects"]:
         assert want <= set(subject)
     assert plan["subject_count"] == len(plan["subjects"])
+    # What kind of reference each subject ended up with, so a pass never has to guess (#8).
+    assert [s["ref_kind"] for s in plan["subjects"]] == ["crop", "none", "crop"]
 
 
 
@@ -346,7 +352,7 @@ def test_a_still_only_subject_is_ordered_by_where_it_sits_in_the_clip():
     still = [[300, 100, 400, 220]]         # pixel centre x 350, but clip-space centre 175
 
     plan = ps.build_subject_plan(clip, [0.9], still, [0.9], (1000, 1000), (2000, 2000),
-                                 0, "union", 0.05, [], 0)
+                                 0, "union", 0.05, [], 0, unmatched_faces="no_reference")
 
     assert [s["clip_face"] for s in plan["subjects"]] == [None, 0]
     assert [s["still_face"] for s in plan["subjects"]] == [0, None]
