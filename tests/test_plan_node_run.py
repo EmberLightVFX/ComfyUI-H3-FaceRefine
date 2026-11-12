@@ -226,6 +226,20 @@ def test_the_untouched_default_writes_todays_bytes(pack, monkeypatch, tmp_path):
     assert written["subjects"][0]["ref_crop"] == [0, 20, 600, 600]
 
 
+def test_a_different_still_into_the_same_job_folder_refuses_naming_the_boxes(pack, monkeypatch):
+    """Spec story 26: two pairings never share one clip. The same job_name with a different
+    still - same subject indices, same widgets, only the measurements moved - is refused, and
+    the refusal names the evidence rather than shrugging."""
+    _run(pack, monkeypatch)                                    # first plan, into "group shot"
+
+    with pytest.raises(ValueError) as exc:
+        _run(pack, monkeypatch, still_boxes=[[210, 210, 410, 450], [1600, 240, 1800, 480]])
+    message = str(exc.value)
+    assert "still_boxes" in message
+    assert "first difference at face 0" in message
+    assert "mix two pairings" in message
+
+
 def test_excluded_faces_come_off_the_subjects_and_into_the_report(pack, monkeypatch):
     plan, _, report, count = _run(pack, monkeypatch, excluded="1")
 

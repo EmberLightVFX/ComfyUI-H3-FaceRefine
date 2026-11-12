@@ -422,6 +422,80 @@ def test_a_plan_folder_is_not_forgotten_when_the_inputs_change(tmp_path):
     assert back["inputs"]["max_subjects"] == 3
 
 
+# --- the fingerprint covers the pairing EVIDENCE, not only the widgets (#11 review, P2) --
+
+def _with_run(plan, detector="face_yolov8m.pt", confidence=0.35):
+    """What the plan node writes into `run`, which is where the detector lives."""
+    plan["run"] = dict(plan.get("run") or {}, job_name="group shot", frames=4,
+                       detector=detector, confidence=confidence)
+    return plan
+
+
+def test_a_different_still_of_the_same_size_refuses_rather_than_resumes(tmp_path):
+    """A nudged still keeps the SAME subject indices and still pairs everyone, so comparing the
+    indices alone would call this the same job. It is not: the passes were cut from a pairing
+    that measured different boxes."""
+    job = ps.job_dir_for(tmp_path, "group shot")
+    ps.write_plan(job, _with_run(_plan()))
+    moved = _with_run(_plan(still_boxes=[[1600, 240, 1800, 480], [210, 210, 410, 450]]))
+
+    # Same subjects, same widgets - only the measured boxes moved.
+    assert ([s["index"] for s in moved["subjects"]]
+            == [s["index"] for s in ps.read_plan(job)["subjects"]])
+    lines = ps.fingerprint_difference(ps.read_plan(job), moved)
+    assert any(line.startswith("still_boxes: ") for line in lines)
+    assert "first difference at face 1" in "\n".join(lines)
+    # The box that moved is named; the boxes that did not are not dumped at the reader.
+    assert "[210.0, 210.0, 410.0, 450.0]" in "\n".join(lines)
+    assert "[1600.0, 240.0, 1800.0, 480.0]" not in "\n".join(lines)
+
+
+def test_a_different_detector_or_confidence_refuses_naming_it(tmp_path):
+    """Another detector can pair different faces into the same indices, so the run record is
+    part of the fingerprint and not a detail of the report."""
+    job = ps.job_dir_for(tmp_path, "group shot")
+    ps.write_plan(job, _with_run(_plan()))
+
+    lines = ps.fingerprint_difference(ps.read_plan(job),
+                                      _with_run(_plan(), detector="face_yolov8s.pt"))
+    assert any(line.startswith("detector: ") for line in lines)
+
+    lines = ps.fingerprint_difference(ps.read_plan(job),
+                                      _with_run(_plan(), confidence=0.25))
+    assert any(line.startswith("confidence: ") for line in lines)
+
+
+def test_an_identical_pairing_resumes_clean(tmp_path):
+    """Same plates, same boxes, same detector, same cap: re-running the plan into its own job
+    folder is a resume, and has to stay possible or no job could ever be re-run."""
+    stored = _with_run(_plan(excluded=[1], max_subjects=2))
+    job = ps.job_dir_for(tmp_path, "group shot")
+    ps.write_plan(job, stored)
+
+    current = _with_run(_plan(excluded=[1], max_subjects=2))
+    assert ps.fingerprint_difference(ps.read_plan(job), current) == []
+    ps.check_pairing_inputs(ps.read_plan(job), current, job, "act on it")
+
+
+def test_the_crop_factor_the_references_were_cut_at_is_part_of_the_fingerprint(tmp_path):
+    """A job folder holds subject references cut at one factor; a plan at another factor would
+    write new references beside passes cut from the old ones."""
+    job = ps.job_dir_for(tmp_path, "group shot")
+    ps.write_plan(job, _plan())
+
+    assert ps.fingerprint_difference(ps.read_plan(job), _plan()) == []
+    lines = ps.fingerprint_difference(ps.read_plan(job), _plan(crop_factor=1.5))
+    assert any(line.startswith("crop_factor: ") for line in lines)
+
+    # A version 2 folder recorded no factor at all, and used the shipped default - which is what
+    # an untouched plan today also uses, so that folder is still the same job.
+    old = _plan()
+    old["version"] = 2
+    del old["inputs"]["crop_factor"]
+    ps.write_plan(job, old)
+    assert ps.fingerprint_difference(ps.read_plan(job), _plan()) == []
+
+
 # --- the tracker's crop_factor, asked of the plan (#11 review, P1) --------------------
 
 def test_the_plan_cuts_subject_references_at_the_crop_factor_it_is_given():

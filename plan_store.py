@@ -1339,16 +1339,30 @@ def read_positions(job_dir, subject) -> dict:
 # old ones, then stitches two different ideas of who is who into one clip. So the inputs that
 # decide the pairing get a fingerprint, and every pass checks it.
 #
-# `max_subjects` is deliberately NOT part of it: it is recorded and not applied (#10), so
-# changing it changes nothing on disk. What it would change is the subject set below, which is
-# compared whatever the widgets say.
+# `max_subjects` USED to be left out because it was recorded and not applied; #10 made it
+# truncate the subject set, so two caps are two jobs and it is in the list below.
 
 PAIRING_INPUT_FIELDS = ("target_size", "still_size", "match_frame", "subject_source",
                         "match_tolerance", "excluded_faces", "unmatched_faces",
                         # #10: the cap used to be inert, so it stayed out of the fingerprint. It
                         # truncates the subject set now, so two caps are two jobs - and the
                         # fingerprint, not the plan version number, is what says so.
-                        "max_subjects")
+                        "max_subjects",
+                        # #11 review: the crop factor decides the rectangle every subject
+                        # reference in the folder was cut with, so a plan at another factor is a
+                        # different job even when the pairing itself is identical.
+                        "crop_factor")
+
+# What the match frame actually MEASURED (#11 review). The subject indices say who was paired;
+# these say which detections that pairing came from. A different still of the same size, or a
+# different detector, can pair different faces into the SAME indices - and a resume on those
+# composites passes cut from two different pairings into one clip.
+PAIRING_EVIDENCE_FIELDS = ("target_boxes", "still_boxes", "scale")
+
+# How the plates were detected, from the plan's own `run` record: same boxes by different
+# settings is a coincidence worth refusing on, because the settings decide what else would have
+# been found at that frame.
+PAIRING_RUN_FIELDS = ("detector", "confidence")
 
 
 def _normalise(value):
@@ -1372,11 +1386,16 @@ def pairing_fingerprint(plan) -> dict:
     """The part of a plan that says WHICH pairing this job was planned on.
 
     Both plate sizes, the match frame, the seeding plate, the tolerance, the exclusions, what was
-    decided about faces that found no partner, and the subject set itself - index, clip face and
-    still face for every subject. The subject set is in here because it is what actually breaks:
-    a re-detect that pairs someone else at the same widgets is still a different job.
-    `unmatched_faces` is in here for the same reason (#8): it does not re-run the pairing, it
-    decides which of the paired faces become subjects at all.
+    decided about faces that found no partner, the crop factor the references were cut at, and the
+    subject set itself - index, clip face and still face for every subject. The subject set is in
+    here because it is what actually breaks: a re-detect that pairs someone else at the same
+    widgets is still a different job. `unmatched_faces` is in here for the same reason (#8): it
+    does not re-run the pairing, it decides which of the paired faces become subjects at all.
+
+    #11 review added the rest of the evidence: the boxes both plates measured at the match frame,
+    their scale, and the detector and confidence that produced them. The subject set is the
+    OUTCOME of a pairing; these are the measurements it came from, and two different pairings can
+    land on the same outcome.
     """
     inputs = (plan or {}).get("inputs") or {}
     record = {}
@@ -1384,7 +1403,16 @@ def pairing_fingerprint(plan) -> dict:
         value = inputs.get(field)
         if value is None:
             value = (plan or {}).get(field)
+        if field == "crop_factor":
+            # A folder written before the plan recorded a factor cut its references at the
+            # shipped default, so a missing field is that default and not a difference.
+            value = plan_crop_factor(plan)
         record[field] = _normalise(value)
+    for field in PAIRING_EVIDENCE_FIELDS:
+        record[field] = _normalise((plan or {}).get(field))
+    run = (plan or {}).get("run") or {}
+    for field in PAIRING_RUN_FIELDS:
+        record[field] = _normalise(run.get(field))
     record["subjects"] = [[_normalise((subject or {}).get("index")),
                            _normalise((subject or {}).get("clip_face")),
                            _normalise((subject or {}).get("still_face"))]
@@ -1394,6 +1422,31 @@ def pairing_fingerprint(plan) -> dict:
 
 def _describe(value) -> str:
     return json.dumps(value, sort_keys=True)
+
+
+def _boxes_differ(a, b) -> bool:
+    return [round(float(v), 3) for v in a] != [round(float(v), 3) for v in b]
+
+
+def _boxes_line(field: str, before, after) -> str:
+    """One box-list difference, in words a person can act on.
+
+    A face box is four numbers and a plate has several faces, so dumping every coordinate of
+    every box reads as noise. What matters is how many faces each side measured and which one
+    moved first - that is the frame to go and look at.
+    """
+    before = list(before or [])
+    after = list(after or [])
+    parts = [f"{field}: the job folder has {len(before)} face(s) at the match frame, this plan "
+             f"has {len(after)}"]
+    shared = min(len(before), len(after))
+    first = next((k for k in range(shared) if _boxes_differ(before[k], after[k])), None)
+    if first is None and len(before) != len(after):
+        parts.append(f"the extra face(s) start at index {shared}")
+    elif first is not None:
+        parts.append(f"first difference at face {first}: there {_describe(before[first])}, "
+                     f"here {_describe(after[first])}")
+    return "; ".join(parts)
 
 
 def _subjects_line(before: list, after: list) -> str:
@@ -1418,12 +1471,24 @@ def fingerprint_difference(stored_plan, current_plan) -> list[str]:
 
     Empty means the same pairing: re-planning it into the same job folder is a resume, not a
     mix, and has to be allowed or no job could ever be re-run.
+
+    The lines are written for a person reading an error at a node: `field: the job folder has X,
+    this plan has Y`, and for the box lists a count plus the first box that moved rather than
+    every coordinate of every face.
     """
     before = pairing_fingerprint(stored_plan)
     after = pairing_fingerprint(current_plan)
     lines = []
     for field in PAIRING_INPUT_FIELDS:
         if before[field] != after[field]:
+            lines.append(f"{field}: the job folder has {_describe(before[field])}, this plan "
+                         f"has {_describe(after[field])}")
+    for field in PAIRING_EVIDENCE_FIELDS + PAIRING_RUN_FIELDS:
+        if before[field] == after[field]:
+            continue
+        if field.endswith("_boxes"):
+            lines.append(_boxes_line(field, before[field], after[field]))
+        else:
             lines.append(f"{field}: the job folder has {_describe(before[field])}, this plan "
                          f"has {_describe(after[field])}")
     if before["subjects"] != after["subjects"]:

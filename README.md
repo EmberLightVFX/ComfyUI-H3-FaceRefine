@@ -1136,12 +1136,18 @@ exists — a whole-still subject's crop is the full frame.
 
 ### The refusal sites: why two pairings never share a clip
 
-The **pairing fingerprint** is the set of inputs that decide who is who: both plate sizes, the
-match frame, `subject_source`, `match_tolerance`, the exclusions, `unmatched_faces`, `max_subjects`,
-and the subject set itself. It is compared at three sites — **H3 Multi-Face Plan** before it
+The **pairing fingerprint** is the set of inputs and measurements that decide who is who: both plate
+sizes, the match frame, `subject_source`, `match_tolerance`, the exclusions, `unmatched_faces`,
+`max_subjects`, the `crop_factor` the **subject references** were cut at, the boxes both plates
+measured at the match frame and their scale, the `detector` and `confidence` that produced them, and
+the subject set itself. It is compared at three sites — **H3 Multi-Face Plan** before it
 overwrites a folder, and **H3 Pass Save**, **H3 Pass Load** and **H3 Multi-Face Composite** before
 they read or write a pass. They exist because a job folder holding two pairings' passes does not
 fail: it returns a clip with faces quietly swapped that looks finished.
+
+The measured boxes are in the fingerprint because the subject set is only the *outcome* of a
+pairing. A different still of the same size, or another detector, can pair different faces into the
+same subject indices — and comparing indices alone would call that a resume.
 
 The refusal names every input that disagrees, one line each, then what to do:
 

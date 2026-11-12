@@ -501,6 +501,7 @@ class H3MultiFacePlan:
             frame, str(subject_source), float(match_tolerance),
             plan_store.parse_excluded_faces(excluded_faces), int(max_subjects),
             str(unmatched_faces), float(crop_factor))
+
         if not plan["subjects"]:
             if plan["excluded_faces"]:
                 raise ValueError(
@@ -525,6 +526,16 @@ class H3MultiFacePlan:
 
         name = _derived_job_name(images, job_name)
         job = plan_store.job_dir_for(folder_paths.get_output_directory(), name)
+        # What this plan was measured with, recorded BEFORE the job folder is read: the pairing
+        # fingerprint compares the detector and the confidence, and a plan that has not yet said
+        # which detector it used cannot be compared with a job folder that did. `still_note` says
+        # which image was paired when a batch was wired in.
+        plan["run"] = {"job_name": name, "frames": frames, "detector": str(detector),
+                       "confidence": float(confidence),
+                       "clip_source": (str(getattr(images, "h3_video_name", "") or "")
+                                       or None)}
+        plan["still_note"] = ("the first image of an N-image reference_still batch"
+                              if int(reference_still.shape[0]) > 1 else "")
         if os.path.isfile(plan_store.plan_path(job)):
             # A job folder is one pairing's. The subject references and every pass inside it
             # were cut from the inputs that made this plan, so overwriting it after a widget
@@ -558,10 +569,6 @@ class H3MultiFacePlan:
                                      subject["ref_crop"])
                 subject["ref_file"] = file_name
                 refs += 1
-        plan["run"] = {"job_name": name, "frames": frames, "detector": str(detector),
-                       "confidence": float(confidence),
-                       "clip_source": (str(getattr(images, "h3_video_name", "") or "")
-                                       or None)}
         # #9: the pairing preview is written here too, before the plan is, so a folder that has
         # a plan also has everything the plan says it wrote. The panel reads this file rather
         # than drawing anything, which is what lets it stay read-only.
