@@ -1523,9 +1523,9 @@ class H3MultiFaceComposite:
                                "node can PROVE the chain is complete: every recorded stitched pass "
                                "has to hold this many frames at this size, or the frames in the "
                                "job folder are not this clip's."
-                               "\n\nThe finished clip's audio is this clip's audio. These nodes "
-                               "carry image batches only, so each pass's generated audio was "
-                               "discarded - wire this clip's own audio into your save node."}),
+                               "\n\nThis node carries image batches only and touches no audio at all, so each pass's generated audio was "
+                               "discarded by never being wired anywhere - whatever audio the "
+                                "finished video has comes from this clip, where you assemble it."}),
                 "overlap_threshold": ("FLOAT", {
                     "default": plan_store.DEFAULT_OVERLAP_THRESHOLD, "min": 0.0, "max": 1.0,
                     "step": 0.01, "round": 0.001,
@@ -1668,9 +1668,10 @@ class H3MultiFaceComposite:
         if not warnings:
             lines.append(f"no overlapping subject crop regions at match frame {frame} "
                          f"(threshold {float(overlap_threshold):g})")
-        lines.append("audio: the finished clip carries the target clip's audio. Each pass's "
-                     "generated audio was discarded - these nodes only ever carry image batches, "
-                     "so wire the target clip's own audio into your save node.")
+        lines.append("audio: this node carries images only and touches no audio at all. Whatever "
+                     "audio the finished clip has comes from the target clip, at the point where "
+                     "you assemble the video - and each pass's generated audio is discarded by "
+                     "never being wired anywhere.")
 
         report = "\n".join(lines)
         print("[H3MultiFaceComposite] " + report.replace("\n", "\n[H3MultiFaceComposite] "))

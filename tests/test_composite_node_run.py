@@ -102,8 +102,11 @@ def test_the_audio_note_names_the_one_audio_that_survives(pack, monkeypatch):
     _, report, _, _ = _composite(pack)().run(plan, CLIP, 0.25)
 
     assert "audio" in report
-    assert "the target clip's audio" in report
+    assert "comes from the target clip" in report
     assert "discarded" in report
+    # The claim has to stay honest: this node cannot make audio survive, it can only say where
+    # the surviving audio comes from.
+    assert "carries images only" in report
 
 
 def test_a_missing_middle_pass_refuses_naming_it_and_where_next_goes(pack, monkeypatch):

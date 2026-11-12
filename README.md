@@ -1374,7 +1374,7 @@ people inside one job. To change the order, change what is in the shot at the ma
 | Input | Default | What it does |
 |---|---|---|
 | `plan` | - | The subject plan every pass in this job ran on. Its subject order **is** the composite order, and it is checked against the `plan.json` already in the job folder: if the pairing inputs differ, the passes in that folder were cut from a different pairing, and this refuses rather than stitching two ideas of who is who into one clip. |
-| `images` | - | The **target clip** — the same `IMAGE` batch that fed the first pass's H3 Face Stitch, from the same loader, unresized and untrimmed. Nothing is composited onto it here. It is wired in so the node can **prove the chain is complete**: every recorded stitched pass has to hold this many frames at this size, or the frames in the folder are not this clip's. It is also where the finished clip's audio comes from — see the audio note. |
+| `images` | - | The **target clip** — the same `IMAGE` batch that fed the first pass's H3 Face Stitch, from the same loader, unresized and untrimmed. Nothing is composited onto it here. It is wired in so the node can **prove the chain is complete**: every recorded stitched pass has to hold this many frames at this size, or the frames in the folder are not this clip's. It is also the clip the finished video's audio comes from, if you wire it there — see the audio note. |
 | `overlap_threshold` | `0.25` | How much of their combined area two subjects' crop regions may share at the match frame before the report warns about them. `0` warns about any overlap, `1` never warns. Measured on the crop regions **H3 Face Track + Crop** would cut, not on the faces inside them. **A warning, never a refusal**: two people standing close are still two subjects and the clip is still the right answer — but one pass's feathered edge lands on the other's refined pixels, and a soft seam across a face is easier to live with once you know where it is. |
 
 **Outputs:** `images` (the composited clip), `report`, `final_subject` (whose frames those are),
@@ -1394,11 +1394,12 @@ next subject: 0   H3 Subject Select's next goes to that subject: run its pass th
 This composite refuses: a half-composited clip is worse than an error. It would look finished while the faces of the subjects named above kept the pixels the target clip arrived with.
 ```
 
-**Audio.** These nodes carry image batches only, so the finished clip's audio is the **target
-clip's** audio and every pass's generated audio was discarded. The report says so at the end of
-every successful run — a silent surprise at the end of a long job is its own kind of bug — and the
-fix is the one the single-subject graph already uses: wire the target clip's own audio into your
-save node.
+**Audio.** These nodes carry image batches only — no node here carries audio, and none of them
+touches it. Whatever audio the finished clip has comes from the **target clip**, at the point
+where you assemble the video; each pass's generated audio is discarded by never being wired
+anywhere. The report says so at the end of every successful run — a silent surprise at the end of
+a long job is its own kind of bug — and the fix is the one the single-subject graph already uses:
+wire the target clip's own audio into your save node.
 
 A finished two-subject job:
 
@@ -1411,7 +1412,7 @@ subject 0   stitched 4 frame(s) at 1000x1000px   <output>/shot 07/passes/subject
 subject 1   stitched 4 frame(s) at 1000x1000px   <output>/shot 07/passes/subject_0001/stitched
 final result: subject 1's stitched frames   this node hands back those 4 frame(s) and blends nothing: they carry subject 0 in them only if each of those passes was composited onto the one before it, which the chain line above says - or says nobody declared
 no overlapping subject crop regions at match frame 2 (threshold 0.25)
-audio: the finished clip carries the target clip's audio. Each pass's generated audio was discarded - these nodes only ever carry image batches, so wire the target clip's own audio into your save node.
+audio: this node carries images only and touches no audio at all. Whatever audio the finished clip has comes from the target clip, at the point where you assemble the video - and each pass's generated audio is discarded by never being wired anywhere.
 ```
 
 Two subjects whose crop regions overlap print this instead — and the job still runs:
