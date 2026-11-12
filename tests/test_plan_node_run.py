@@ -166,3 +166,18 @@ def test_a_differently_framed_still_refuses_rather_than_pairs(pack, monkeypatch)
         _run(pack, monkeypatch, still_size=(1500, 1125))
     assert "aspect" in str(exc.value)
 
+
+
+def test_a_still_of_the_same_size_as_the_clip_pairs_and_previews_without_resizing(pack,
+                                                                                 monkeypatch):
+    """A still cut from the clip's own frame: factor 1, and the two plates simply sit side
+    by side - the branch of the preview that needs no resize."""
+    plan, preview, report, count = _run(pack, monkeypatch, still_boxes=CLIP_BOXES,
+                                        still_size=(1000, 1000), job_name="same size")
+
+    assert count == 3 == plan["subject_count"]
+    assert [s["still_face"] for s in plan["subjects"]] == [0, 1, 2]
+    assert plan["scale"] == pytest.approx(1.0)
+    assert "still -> clip scale 1.000" in report
+    assert preview.dim() == 4 and preview.shape[1] == 1000
+

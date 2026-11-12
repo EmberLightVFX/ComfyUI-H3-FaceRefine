@@ -142,10 +142,14 @@ def _pairing_preview(clip_frame, still_frame, clip_boxes, still_boxes, plan):
         resized = torch.nn.functional.interpolate(
             still_frame[..., :3].permute(2, 0, 1).unsqueeze(0), size=(h, w),
             mode="bilinear", align_corners=False)
-        still_plate = resized[0].permute(1, 2, 0).to(clip_frame.dtype)
+        still_plate = resized[0].permute(1, 2, 0)
     else:
-        still_plate = still_frame[..., :3].clone()
+        still_plate = still_frame[..., :3]
     clip_plate = clip_frame[..., :3].clone()
+    # Two plates can arrive on different devices or in different dtypes; the concat below is
+    # one image, so they are put on the same terms as the clip.
+    still_plate = still_plate.clone().to(dtype=clip_plate.dtype,
+                                         device=clip_plate.device)
 
     # One colour per subject, shared by the two detections of that person.
     clip_colour: dict[int, tuple] = {}
@@ -177,6 +181,11 @@ def _pairing_preview(clip_frame, still_frame, clip_boxes, still_boxes, plan):
     return torch.cat([clip_plate, gap, still_plate], dim=1).unsqueeze(0)
 
 
+def _line(label: str, text: str) -> str:
+    """One report row: a label column, then what it means."""
+    return f"{label:<16}{text}"
+
+
 def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
     """What the job costs, who is in it, and what was written where.
 
@@ -188,29 +197,33 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
     sw, sh = plan["inputs"]["still_size"]
     scale = float(plan["scale"])
     lines = [
-        f"job            {plan['run']['job_name']}",
-        f"target clip    {tw}x{th}   {frames} frame(s)   match frame {plan['match_frame']}",
-        f"reference still {sw}x{sh}   still -> clip scale {scale:.3f}"
-        f"   (1 clip px = {1.0 / scale:.3f} still px)",
-        f"cost           {plan['subject_count']} subject(s) x {frames} frame(s)"
-        f" @ {canvas_w}x{canvas_h}"
-        f"   = {plan['subject_count'] * frames} frame(s) to generate",
-        f"               (canvas size is H3 Face Track + Crop's;"
-        f" crops are {DEFAULT_CROP_FACTOR}x face height)",
-        f"pairing        {plan['inputs']['subject_source']}"
-        f"   tolerance {plan['inputs']['match_tolerance']:.3f}"
-        f" = {plan['tolerance_px']:.0f}px of the {tw}x{th} diagonal"
-        f"   {len(plan['pairs'])} of {len(plan['target_boxes'])} clip face(s) paired",
+        _line("job", plan["run"]["job_name"]),
+        _line("target clip", f"{tw}x{th}   {frames} frame(s)"
+                             f"   match frame {plan['match_frame']}"),
+        _line("reference still", f"{sw}x{sh}   still -> clip scale {scale:.3f}"
+                                 f"   (1 clip px = {1.0 / scale:.3f} still px)"),
+        _line("cost", f"{plan['subject_count']} subject(s) x {frames} frame(s)"
+                      f" @ {canvas_w}x{canvas_h}"
+                      f"   = {plan['subject_count'] * frames} frame(s) to generate"),
+        _line("", f"(canvas size is H3 Face Track + Crop's;"
+                  f" crops are {DEFAULT_CROP_FACTOR}x face height)"),
+        _line("pairing", f"{plan['inputs']['subject_source']}"
+                         f"   tolerance {plan['inputs']['match_tolerance']:.3f}"
+                         f" = {plan['tolerance_px']:.0f}px of the {tw}x{th} diagonal"
+                         f"   {len(plan['pairs'])} of {len(plan['target_boxes'])}"
+                         f" clip face(s) paired"),
     ]
     if plan["excluded_faces"]:
-        lines.append(
-            f"excluded       clip face(s) {', '.join(str(i) for i in plan['excluded_faces'])}"
-            f" - switched off, so they keep their original pixels")
+        lines.append(_line(
+            "excluded",
+            f"clip face(s) {', '.join(str(i) for i in plan['excluded_faces'])}"
+            f" - switched off, so they keep their original pixels"))
     else:
-        lines.append("excluded       none")
+        lines.append(_line("excluded", "none"))
     if plan["inputs"]["max_subjects"]:
-        lines.append(f"max_subjects   {plan['inputs']['max_subjects']}"
-                     f" (recorded in the plan; the passes act on it)")
+        lines.append(_line("max_subjects", f"{plan['inputs']['max_subjects']}"
+                                           f" (recorded in the plan; the passes act"
+                                           f" on it)"))
 
     for subject in plan["subjects"]:
         where = (f"clip face {subject['clip_face']}" if subject["clip_face"] is not None
@@ -223,14 +236,14 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
         else:
             ref = ("NO subject reference - refine it without one, or fix the pairing"
                    " and re-run this node")
-        lines.append(f"subject {subject['index']:<4} {where}   {ref}")
+        lines.append(_line(f"subject {subject['index']}", where + "   " + ref))
 
-    lines.append(f"written        {job_dir}")
-    lines.append(f"               {plan_store.PLAN_FILENAME} + {refs} subject reference"
-                 f" crop(s)")
+    lines.append(_line("written", job_dir))
+    lines.append(_line("", f"{plan_store.PLAN_FILENAME} + {refs} subject reference"
+                           f" crop(s)"))
     if notes:
-        lines.append("notes")
-        lines.extend(f"  - {note}" for note in notes)
+        lines.append(_line("notes", ""))
+        lines.extend(_line("", f"- {note}") for note in notes)
     return "\n".join(lines)
 
 
