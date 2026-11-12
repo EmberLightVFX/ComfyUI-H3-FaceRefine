@@ -1,0 +1,39 @@
+name: Tests
+
+# Deliberately narrow: these tests hold the geometry under multi-face pairing - the part
+# that can be checked honestly without a GPU, without model weights and without ComfyUI
+# itself. Nothing here loads a detector or touches CUDA.
+on:
+  push:
+    branches: [main, "integration/*", "ticket/*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Pairing and subject plan (CPU only, no ComfyUI)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test requirements
+        # Only pytest and numpy - NOT the pack's own dependencies. No torch, no
+        # ultralytics, no insightface, no ComfyUI on the path: `plan_store.py` imports
+        # numpy and the standard library only, and `tests/test_node_contract.py` fails the
+        # build if that ever stops being true. The torch-backed smoke test skips itself
+        # here rather than pretending to check something it cannot.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest numpy
+
+      - name: pytest
+        run: pytest
