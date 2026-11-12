@@ -28,6 +28,21 @@ except ImportError:  # imported by name from the pack root, as the unit tests do
 H3FACEPLAN = "H3FACEPLAN"
 CUSTOM_TYPES = (H3FACEPLAN,)
 
+# The released pick type, used as-is on purpose (ADR 0005): a pass emits an `H3FACEPICK`, so
+# `H3FaceTrackCrop`, `H3PerFrameDenoise` and `H3FaceStitch` run unmodified inside every pass.
+# Deliberately NOT in CUSTOM_TYPES - it is registered by `nodes.py`, and re-registering the
+# released types is how saved graphs stop meaning what they meant (ADR 0002).
+H3FACEPICK = "H3FACEPICK"
+
+# The Subject Select widget's first option and its default: the cursor through a job.
+NEXT_SUBJECT = "next"
+
+# Subject numbers the widget offers, matching the released tracker's 0-63 face ceiling. The
+# list cannot be the plan's own subjects: `INPUT_TYPES()` is a classmethod that never sees the
+# wired plan, so naming the subjects is the report's job (and a front end's, later).
+MAX_SUBJECT_CHOICES = 64
+
+
 CATEGORY = "MiniMax H3/Face Refine"
 
 # The pack's own tracker defaults, quoted so the report can name the cost of a job before
@@ -441,6 +456,462 @@ class H3MultiFacePlan:
         return (plan, preview, report, int(plan["subject_count"]))
 
 
-NODE_CLASS_MAPPINGS = {"H3MultiFacePlan": H3MultiFacePlan}
-NODE_DISPLAY_NAME_MAPPINGS = {"H3MultiFacePlan": "H3 Multi-Face Plan"}
+# ----------------------------------------------------------------------------
+# H3 Subject Select: one subject out of the plan, one single-subject pick out to the
+# released tracker (ADR 0005)
+# ----------------------------------------------------------------------------
+
+def subject_label(subject) -> str:
+    """How a subject is named to a human: their number, their face in the clip, and the face
+    in the reference still that became their subject reference."""
+    index = int(subject["index"])
+    clip_face = subject.get("clip_face")
+    still_face = subject.get("still_face")
+    where = f"clip face {clip_face}" if clip_face is not None else "not seen in the clip"
+    ref = (f"still face {still_face}" if still_face is not None
+           else "no subject reference")
+    return f"{index}: {where} -> {ref}"
+
+
+def resolve_subject(plan, choice, job_dir=None) -> dict:
+    """The subject the widget asked for.
+
+    ``next`` reads the job folder's pass manifest, so re-queueing the same graph walks the
+    plan instead of re-running whoever was last. A bare subject number works, and so does a
+    whole label - including one saved by an older label format, since the number leads it.
+    Anything else raises with the choices spelled out: the plan is the only place the names
+    come from, so a silent fallback would refine the wrong person.
+    """
+    subjects = (plan or {}).get("subjects") or []
+    if not subjects:
+        raise ValueError(
+            "this subject plan holds no subjects, so there is nobody to select. Re-run "
+            "H3 Multi-Face Plan - every face may have landed in excluded_faces."
+        )
+    wanted = str(NEXT_SUBJECT if choice is None else choice).strip()
+
+    if wanted == NEXT_SUBJECT:
+        if not job_dir:
+            raise ValueError(
+                "'next' has to read the job folder to know which passes are already done, "
+                "and this plan records no job folder of its own. Run H3 Multi-Face Plan "
+                "with job_name set, or name the subject instead of 'next'."
+            )
+        subject = plan_store.next_subject(plan, job_dir)
+        if subject is None:
+            raise ValueError(
+                f"every subject in this plan already has a completed pass recorded in "
+                f"{plan_store.manifest_path(job_dir)}. Nothing is left to refine: composite "
+                f"the passes, or delete that manifest to run the job again."
+            )
+        return subject
+
+    for subject in subjects:
+        if subject_label(subject) == wanted:
+            return subject
+    head = wanted.split(":", 1)[0].strip()
+    for subject in subjects:
+        if wanted == str(subject["index"]) or head == str(subject["index"]):
+            return subject
+
+    raise ValueError(
+        f"subject {choice!r} is not one this plan holds. Use {NEXT_SUBJECT} for the next "
+        f"subject with no completed pass, or one of: "
+        f"{', '.join(subject_label(s) for s in subjects)}"
+    )
+
+
+def _left_to_right_order(boxes) -> list[int]:
+    """Face indices counted left to right, as the pairing preview and Pick faces number them.
+
+    Mirrors the released tracker's own ``left_most`` ranking (nodes.py:866): centre x first,
+    ties settled on the box corner, so two faces at the same height never swap numbers. The
+    tracker scores ``left_most`` as ``-centre_x`` and sorts on the negated score, which lands
+    on ascending centre x - the same order, spelled out here rather than doubled-negated.
+    """
+    return sorted(
+        range(len(boxes)),
+        key=lambda k: ((float(boxes[k][0]) + float(boxes[k][2])) / 2.0,
+                       float(boxes[k][0]), float(boxes[k][1])))
+
+
+def _iou(a, b) -> float:
+    """Overlap of two boxes - the only honest way to say "the face in the plan is that face
+    in the payload", since the plan's detection pass and the picker's may have returned them
+    in a different order."""
+    ax1, ay1, ax2, ay2 = (float(v) for v in a)
+    bx1, by1, bx2, by2 = (float(v) for v in b)
+    inter = (max(0.0, min(ax2, bx2) - max(ax1, bx1))
+             * max(0.0, min(ay2, by2) - max(ay1, by1)))
+    if inter <= 0.0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0.0 else 0.0
+
+
+def _planned_face_index(plan_box, on_frame, clip_face, match_frame) -> int:
+    """Which of the payload's boxes on the match frame is the face the plan measured."""
+    best, best_iou = None, 0.0
+    for i, box in enumerate(on_frame):
+        score = _iou(plan_box, box)
+        if score > best_iou:
+            best, best_iou = i, score
+    if best is not None and best_iou > 0.0:
+        return best
+    if 0 <= int(clip_face) < len(on_frame):
+        # Nothing to overlap with: the two detections of this face sit far apart, so geometry
+        # cannot settle it. Take the index the plan recorded, which is the order its own
+        # detection came back in.
+        return int(clip_face)
+    raise ValueError(
+        f"the pick found {len(on_frame)} face(s) on the plan's match frame {match_frame}, "
+        f"and none of them is the face the plan recorded for this subject (clip face "
+        f"{clip_face}). The plan and the pick are not two detections of the same frame. "
+        f"Re-run H3 Multi-Face Plan with the same detector, confidence, match_frame and "
+        f"frame range as H3 Load Video + Face Select."
+    )
+
+
+def _shot_lock(all_boxes, start: int, end: int, face_number: int, match_frame: int):
+    """Where a shot locks onto the subject: the frame it measures them on, and which box.
+
+    Searches from the match frame when the shot holds it - the frame the plan actually
+    measured - then forward, then back to the shot start: the order the released
+    ``_auto_pick`` uses for a hand-picked shot. A shot that never shows as many faces as the
+    subject's number has nobody at that number to name, so it answers ``None`` and the caller
+    marks it absent rather than handing the tracker whoever happens to be nearest.
+    """
+    first = match_frame if start <= match_frame < end else start
+    for frame in list(range(first, end)) + list(range(start, first)):
+        if len(all_boxes[frame]) > face_number:
+            return frame, _left_to_right_order(all_boxes[frame])[face_number]
+    return None
+
+
+def narrow_pick_to_subject(plan, face_pick, subject) -> dict:
+    """One subject's `H3FACEPICK`: the clip's boxes untouched, `picks` rewritten for one person.
+
+    The plan records the match frame only - it detects both plates once, by design - so the
+    clip's own payload, from H3 Load Video + Face Select, carries every other frame. Nothing
+    here detects, re-pairs or re-picks anything: detection stays exactly once in the graph.
+
+    The plan's match-frame choice becomes a pick per shot through the subject's face NUMBER,
+    counted left to right, because a cut renumbers the boxes: a pick entry names a box index
+    on ONE frame, so carrying the plan's index across a cut would track a different person.
+    A shot that never shows that many faces gets ``absent: true``, which is how the released
+    payload already says "this person is not in this shot" (nodes.py:1334) - those frames keep
+    their original pixels rather than having whoever is nearest refined in their place.
+
+    The input payload is never modified. Two passes in one graph read the same payload, and a
+    shared dict would leak one subject's picks into the next subject's run.
+    """
+    if not isinstance(face_pick, dict):
+        raise ValueError(
+            "face_pick is not a pick payload - wire H3 Load Video + Face Select's face_pick "
+            "output here. Its boxes are what the pass crops, so detecting them again is not "
+            "an option."
+        )
+    payload_boxes = face_pick.get("boxes")
+    frames = int(face_pick.get("frames", -1))
+    if not payload_boxes or frames < 0:
+        raise ValueError(
+            "face_pick carries no boxes, so it is not the payload H3 Load Video + Face "
+            "Select emits. Wire that node's face_pick output into this one."
+        )
+    if len(payload_boxes) != frames:
+        raise ValueError(
+            f"face_pick says {frames} frame(s) but holds {len(payload_boxes)} - it is half a "
+            f"payload. Re-run H3 Load Video + Face Select."
+        )
+
+    match_frame = int((plan or {}).get(
+        "match_frame", ((plan or {}).get("inputs") or {}).get("match_frame", -1)))
+    if not 0 <= match_frame < frames:
+        raise ValueError(
+            f"the plan's match frame {match_frame} is outside the {frames} frame(s) this "
+            f"pick describes, so the plan cannot name the subject in it. The plan and the "
+            f"pick have to come from the same clip, untrimmed and un-resized between them."
+        )
+
+    src = face_pick.get("src_size") or (0, 0)
+    planned = ((plan or {}).get("inputs") or {}).get("target_size")
+    if planned and src and (int(src[0]) != int(planned[0]) or int(src[1]) != int(planned[1])):
+        raise ValueError(
+            f"the plan measured a {planned[0]}x{planned[1]} target clip, but this pick's "
+            f"src_size is {src[0]}x{src[1]} - every box in it would land in the wrong place. "
+            f"Wire the plan and the pick from the same clip: no resize, crop or scale between "
+            f"H3 Load Video + Face Select and this node."
+        )
+
+    clip_face, plan_box = subject.get("clip_face"), subject.get("clip_box")
+    if clip_face is None or plan_box is None:
+        raise ValueError(
+            f"subject {subject['index']} has no clip face - the plan found that head only in "
+            f"the reference still, so no frame of the target clip can be named for it and a "
+            f"pass would refine whoever else was in shot. Switch it off with excluded_faces "
+            f"on H3 Multi-Face Plan, or select a different subject."
+        )
+
+    on_match = payload_boxes[match_frame]
+    face_index = _planned_face_index(plan_box, on_match, clip_face, match_frame)
+    face_number = _left_to_right_order(on_match).index(face_index)
+
+    segments = [(int(a), int(b)) for a, b in (face_pick.get("segments") or [])]
+    if not segments:
+        segments = [(0, frames)]
+
+    picks = []
+    for a, b in segments:
+        a, b = max(0, a), min(frames, b)
+        lock = _shot_lock(payload_boxes, a, b, face_number, match_frame)
+        if lock is None:
+            picks.append({"segment": [a, b], "frame": -1, "box": -1,
+                          "index": face_number, "absent": True})
+        else:
+            picks.append({"segment": [a, b], "frame": int(lock[0]), "box": int(lock[1]),
+                          "index": face_number, "absent": False})
+
+    narrowed = dict(face_pick)
+    narrowed["picks"] = picks
+    # Informational, for whoever reads a payload while debugging a pass: the tracker itself
+    # reads boxes, confs, segments, picks, detector and confidence, and nothing else.
+    narrowed["select"] = "subject_plan"
+    narrowed["select_index"] = face_number
+    narrowed["rank_by"] = "left_most"
+    narrowed["subject_index"] = int(subject["index"])
+    narrowed["plan_match_frame"] = match_frame
+    return narrowed
+
+
+def absent_shots(narrowed) -> list:
+    """The shot numbers this subject is not in, 1-based, as the report names them."""
+    return [k + 1 for k, pick in enumerate(narrowed.get("picks") or []) if pick.get("absent")]
+
+
+def subject_report(plan, subject, narrowed, job_dir=None, reference_note: str = "",
+                   cursor_note: str = "") -> str:
+    """Who was chosen, which frame each shot locks onto, and where the reference is.
+
+    A pass gets queued over and over without anyone re-reading the graph, so the report is the
+    review step: it names the subject and their pairing, says which shots they are absent from
+    and what that costs, and says what the tracker must NOT be handed - the identity anchor is
+    rebuilt from this subject's own crops in the target clip, never from the still (ADR 0003).
+    """
+    subjects = (plan or {}).get("subjects") or []
+    picks = narrowed.get("picks") or []
+    face_number = int(narrowed.get("select_index", 0))
+    match_frame = narrowed.get("plan_match_frame")
+    paired = subject.get("still_face") is not None
+    on_match = 0
+    try:
+        on_match = len((narrowed.get("boxes") or [])[int(match_frame)])
+    except (IndexError, TypeError, ValueError):
+        on_match = 0
+
+    pairing = (f"still face {subject['still_face']} (paired)" if paired
+               else "no subject reference (unpaired)")
+    lines = [
+        _line("chosen", f"subject {subject['index']} of {len(subjects)}   "
+                        f"clip face {subject.get('clip_face')}   ->   {pairing}"),
+        _line("pick", f"{len(picks)} shot(s) at face {face_number + 1} of {on_match},"
+                      f"   measured on match frame {match_frame}"),
+    ]
+    for k, pick in enumerate(picks):
+        a, b = int(pick["segment"][0]), int(pick["segment"][1])
+        if pick.get("absent"):
+            where = ("absent - no frame of this shot shows this face number, so those frames"
+                     " keep their original pixels. If this person IS in this shot, name them"
+                     " with Pick faces or plan on a match frame they share with the still.")
+        else:
+            where = f"locks on frame {pick['frame']}, box {pick['box']}"
+        lines.append(_line("", f"shot {k + 1} frames {a}-{b - 1} ({b - a}): {where}"))
+
+    lines.append(_line(
+        "pass", f"no detection - the clip's boxes ride in on the pick payload"
+                f"   (detector {narrowed.get('detector')}, confidence "
+                f"{narrowed.get('confidence')}, {narrowed.get('frames')} frame(s))"))
+    lines.append(_line(
+        "anchor", "leave identity_reference to the tracker: it rebuilds this subject's "
+                  "identity anchor from their matched crops in the target clip (ADR 0003). "
+                  "The subject reference is H3's picture input, not an identity input; "
+                  "wiring it into identity_reference anchors the track on the wrong domain."))
+    if job_dir:
+        lines.append(_line("job", job_dir))
+    if reference_note:
+        lines.append(_line("reference", reference_note))
+    if cursor_note:
+        lines.append(_line("next", cursor_note))
+    gone = absent_shots(narrowed)
+    if gone:
+        lines.append(_line(
+            "absent", f"shot(s) {', '.join(str(k) for k in gone)} left untouched for this "
+                      f"subject - they cost no generated frames here, and their faces stay "
+                      f"exactly as they are in this pass"))
+    return "\n".join(lines)
+
+
+def _output_root() -> str:
+    """ComfyUI's output folder, asked for where importing ComfyUI is allowed."""
+    import folder_paths
+
+    return str(folder_paths.get_output_directory())
+
+
+def job_dir_for_plan(plan):
+    """The job folder the plan was written into, or ``None`` when the plan records none.
+
+    The plan carries its own ``run.job_name``, so a pass needs no widget to find its own
+    folder - and two jobs in one output tree cannot read each other's references.
+    """
+    name = ((plan or {}).get("run") or {}).get("job_name")
+    if not name:
+        return None
+    return plan_store.job_dir_for(_output_root(), str(name))
+
+
+def _read_reference_png(path):
+    """One subject reference crop off disk, as a one-frame IMAGE batch.
+
+    Here, and not in `plan_store`, because this is the ComfyUI half of the job folder: the
+    crop is already cut at the still's native resolution, so a pass never loads the reference
+    still again - which is also why a reference can never be upscaled.
+    """
+    from PIL import Image
+
+    import torch
+
+    with Image.open(path) as plate:
+        arr = np.asarray(plate.convert("RGB"), dtype=np.float32) / 255.0
+    return torch.from_numpy(arr).unsqueeze(0)
+
+
+def load_subject_reference(job_dir, subject):
+    """``(IMAGE or None, 1/0, what the report says about it)``.
+
+    A subject with no subject reference is a normal state of a plan, not an error: that pass
+    runs with nothing wired into H3's reference slots. ``None`` rather than a black
+    placeholder, so a graph that insists on a reference fails loudly instead of generating
+    from mush dressed up as detail.
+    """
+    name = (subject or {}).get("ref_file")
+    index = (subject or {}).get("index")
+    if not name:
+        return None, 0, (f"subject {index} has no subject reference: no face in the "
+                         f"reference still paired with this clip face, so this pass runs "
+                         f"with nothing wired into H3's reference slots")
+    if not job_dir:
+        return None, 0, (f"the plan records no job folder, so {name} cannot be read: run "
+                         f"H3 Multi-Face Plan with job_name set")
+    path = os.path.join(str(job_dir), str(name))
+    if not os.path.isfile(path):
+        return None, 0, (f"{name} is not in {job_dir}: this subject has no subject reference "
+                         f"on disk, so this pass runs with nothing wired into H3's reference "
+                         f"slots")
+    reference = _read_reference_png(path)
+    return (reference, 1,
+            f"{name}   {int(reference.shape[2])}x{int(reference.shape[1])}px, read from the "
+            f"job folder - the reference still is not loaded again")
+
+
+class H3SubjectSelect:
+    """Choose one **subject** out of the subject plan and emit a pick payload for that one
+    person, in the shape `H3 Face Track + Crop` already accepts (ADR 0005).
+
+    Two inputs, because two things decide this: the **plan** says which face is the subject,
+    which still crop is their subject reference, and whether they were paired at all; the
+    clip's own **pick payload** carries a box for every frame of the clip, which the plan never
+    measured. Detection therefore stays exactly once in your graph - H3 Load Video + Face
+    Select does it, this node reads it, and the tracker that follows runs no detection pass at
+    all.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # WIDGET ORDER IS PERMANENT. ComfyUI stores widget values by position, so inserting or
+        # reordering one silently reinterprets a saved workflow (ADR 0002). Anything new goes
+        # at the END. tests/test_node_contract.py pins this list.
+        #
+        # There is deliberately NO identity_reference input here, and no reference_still one.
+        # ADR 0003: each subject's identity anchor is rebuilt from their own matched crops in
+        # the TARGET CLIP, which the released tracker already does by itself once a face_pick
+        # names the subject per shot and identity_reference is left unwired. Feeding the
+        # subject reference into it would anchor the track on a different image domain - the
+        # measured 0.305-similarity failure mode (nodes.py:1104). The subject reference this
+        # node outputs belongs in H3's ref_image slots and nowhere else.
+        return {
+            "required": {
+                "plan": (H3FACEPLAN, {
+                    "tooltip": "The subject plan, from H3 Multi-Face Plan: who the subjects "
+                               "are, which face in the target clip each one is, and which "
+                               "face in the reference still became their subject reference."
+                               "\n\nIt records the match frame's boxes only - that is where "
+                               "both plates were detected - so it cannot name this subject in "
+                               "the other shots on its own. That is what face_pick is for."}),
+                "face_pick": (H3FACEPICK, {
+                    "tooltip": "This clip's own pick payload, from H3 Load Video + Face "
+                               "Select - the same loader the images batch comes from."
+                               "\n\nEvery frame's boxes, confidences and shot boundaries "
+                               "travel in it, so the pass crops without detecting anything. "
+                               "Its picks are replaced with this subject's; the boxes pass "
+                               "through untouched, which is what lets the tracker skip its "
+                               "detection pass entirely."
+                               "\n\nWire this into H3 Face Track + Crop's face_pick input too. "
+                               "Do not resize, crop or trim between the loader and this node: "
+                               "every box would land in the wrong place."}),
+                "subject": (["next"] + [str(i) for i in range(MAX_SUBJECT_CHOICES)], {
+                    "default": NEXT_SUBJECT,
+                    "tooltip": "Which subject this pass refines.\n\n"
+                               "next (default): the first subject in plan order with no "
+                               "completed pass recorded in the job folder. Queue the graph "
+                               "once per subject and change nothing in between - the "
+                               "bookkeeping lives in the job folder, and H3 Pass Save is what "
+                               "writes that record.\n\n"
+                               "a number: that subject, by the number H3 Multi-Face Plan "
+                               "prints in its report and on the pairing preview. Use it to "
+                               "pick a specific subject, or to re-run one.\n\n"
+                               "The list cannot show the plan's own names: ComfyUI asks for "
+                               "the options before anything is wired, so the plan is not "
+                               "readable yet. The report names every subject in the plan, and "
+                               "an answer that is not one of them lists them."}),
+            },
+        }
+
+    RETURN_TYPES = (H3FACEPICK, "IMAGE", "INT", "INT", "STRING")
+    RETURN_NAMES = ("face_pick", "subject_reference", "reference_exists", "subject_index",
+                    "report")
+    FUNCTION = "run"
+    CATEGORY = CATEGORY
+
+    def run(self, plan, face_pick, subject=NEXT_SUBJECT):
+        if not isinstance(plan, dict) or "subjects" not in plan:
+            raise ValueError(
+                "plan is not a subject plan - wire it from H3 Multi-Face Plan's plan output, "
+                "or read it out of the job folder's plan.json."
+            )
+
+        job = job_dir_for_plan(plan)
+        chosen = resolve_subject(plan, subject, job)
+        narrowed = narrow_pick_to_subject(plan, face_pick, chosen)
+        reference, exists, reference_note = load_subject_reference(job, chosen)
+
+        cursor = ""
+        if str(NEXT_SUBJECT if subject is None else subject).strip() == NEXT_SUBJECT and job:
+            done = plan_store.completed_subjects(plan, job)
+            cursor = (f"subject {chosen['index']} of {len(plan['subjects'])} is up"
+                      + (f"   already recorded complete: subject(s) "
+                         f"{', '.join(str(i) for i in done)}" if done
+                         else "   no completed pass recorded in this job yet"))
+
+        report = subject_report(plan, chosen, narrowed, job_dir=job,
+                               reference_note=reference_note, cursor_note=cursor)
+        print("[H3SubjectSelect] " + report.replace("\n", "\n[H3SubjectSelect] "))
+        return (narrowed, reference, int(exists), int(chosen["index"]), report)
+
+
+NODE_CLASS_MAPPINGS = {"H3MultiFacePlan": H3MultiFacePlan,
+                       "H3SubjectSelect": H3SubjectSelect}
+NODE_DISPLAY_NAME_MAPPINGS = {"H3MultiFacePlan": "H3 Multi-Face Plan",
+                              "H3SubjectSelect": "H3 Subject Select"}
 

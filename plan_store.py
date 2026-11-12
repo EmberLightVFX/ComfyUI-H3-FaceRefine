@@ -519,3 +519,97 @@ def read_plan(job_dir) -> dict:
         raise ValueError(f"{path} does not hold a subject plan")
     return plan
 
+
+# ----------------------------------------------------------------------------
+# the pass manifest: which subjects already had their pass
+# ----------------------------------------------------------------------------
+#
+# READ side only, on purpose: H3 Subject Select has to answer "which subject is next"
+# before anything in the job has been saved, and it must not have to write anything to
+# do it. # ticket #5 writes this - H3 Pass Save records a pass complete here once its
+# crops and its stitched result are on disk. The shape below is the contract that
+# ticket writes, stated here so the two ends agree without either importing the other:
+#
+#   {"version": 1, "passes": {"<subject index>": {"complete": true, ...}}}
+#
+# Keys are strings because JSON object keys are. A subject with no entry, or an entry
+# whose `complete` is not true, has not finished.
+
+MANIFEST_VERSION = 1
+MANIFEST_FILENAME = "manifest.json"
+
+
+def manifest_path(job_dir) -> str:
+    """Where a job's pass manifest lives."""
+    return os.path.join(str(job_dir), MANIFEST_FILENAME)
+
+
+def read_manifest(job_dir) -> dict:
+    """The job's pass manifest, or an empty one when there is no manifest yet.
+
+    A job that has never completed a pass has no manifest: that is the normal state of a
+    fresh job, not a missing file, and asking "who is next" on a job that has not started
+    has to work.
+    """
+    path = manifest_path(job_dir)
+    if not os.path.isfile(path):
+        return {"version": MANIFEST_VERSION, "passes": {}}
+    with open(path, encoding="utf-8") as fh:
+        try:
+            manifest = json.load(fh)
+        except ValueError:
+            raise ValueError(
+                f"{path} is not readable JSON, so no pass in this job can be trusted as "
+                f"complete. Delete it to start the bookkeeping over, or fix it by hand."
+            ) from None
+    if not isinstance(manifest, dict):
+        raise ValueError(f"{path} does not hold a pass manifest")
+    return manifest
+
+
+def _pass_is_complete(record) -> bool:
+    """One manifest entry, read as "did this subject's pass finish?".
+
+    Forgiving about the wrapper (a bare ``true`` counts) because the writer is a later
+    ticket; unforgiving about everything else, so a half-written record never reads as
+    "already done" and silently skips a subject.
+    """
+    if isinstance(record, dict):
+        return bool(record.get("complete"))
+    return bool(record)
+
+
+def completed_subjects(plan, job_dir) -> list[int]:
+    """Subject indices this plan holds whose pass the manifest records complete.
+
+    Only subjects the plan actually has are counted, and they come back in plan order: a
+    manifest left in the folder from a different plan cannot answer for this job.
+    """
+    passes = read_manifest(job_dir).get("passes") or {}
+    if not isinstance(passes, dict):
+        raise ValueError(
+            f"{manifest_path(job_dir)} has no 'passes' object, so its record of completed "
+            f"passes cannot be read"
+        )
+    done = {str(key) for key, record in passes.items() if _pass_is_complete(record)}
+    out = []
+    for subject in plan.get("subjects") or []:
+        index = int(subject["index"])
+        if str(index) in done:
+            out.append(index)
+    return out
+
+
+def next_subject(plan, job_dir):
+    """The first subject in plan order with no recorded completed pass.
+
+    ``None`` when every subject has one: the whole job is done, and inventing a subject to
+    run again would cost a generation for nothing.
+    """
+    done = set(completed_subjects(plan, job_dir))
+    for subject in plan.get("subjects") or []:
+        if int(subject["index"]) not in done:
+            return subject
+    return None
+
+
