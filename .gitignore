@@ -25,5 +25,6 @@ Thumbs.db
 .continue/
 .windsurf/
 .mcp.json
+# AGENTS.md is deliberately NOT ignored: it carries the `## Agent skills` block the
+# engineering skills read, and `docs/agents/*.md` is committed alongside it.
 CLAUDE.md
-AGENTS.md
