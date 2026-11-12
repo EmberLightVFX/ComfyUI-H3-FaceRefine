@@ -46,5 +46,17 @@ try:
 except Exception as _exc:  # the nodes must load even if the picker route does not
     print("[H3FaceRefine] face picker unavailable: %s" % _exc)
 
+# The read-only pairing preview (#9): a panel on H3 Multi-Face Plan showing the plan node's own
+# pairing preview image and every subject's reference crop, read out of the job folder. It has
+# one route, its own front-end script, and it writes nothing - exclusions stay the typed
+# `excluded_faces` widget. Registered the same way as the picker, so the nodes still load if the
+# route does not register.
+try:
+    from . import pair_preview_api
+
+    pair_preview_api.register()
+except Exception as _exc:  # the nodes must load even if the preview route does not
+    print("[H3FaceRefine] pairing preview unavailable: %s" % _exc)
+
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "CUSTOM_TYPES",
            "WEB_DIRECTORY"]

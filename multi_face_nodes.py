@@ -143,6 +143,22 @@ def _write_reference_png(path, frame, rect) -> tuple[int, int]:
 
 
 
+def _write_preview_png(path, preview) -> str:
+    """Write the pairing preview image the node already built into the job folder (#9).
+
+    The same tensor the node returns as its `preview` output, as the same bytes: no second
+    drawing pass, so the file the panel shows cannot disagree with what this node decided. The
+    tensor is one BCHW image of both plates side by side, so it goes out at the height the
+    preview is drawn at.
+    """
+    from PIL import Image
+
+    frame = preview[0] if int(preview.dim()) == 4 else preview
+    arr = (frame[..., :3].clamp(0.0, 1.0).cpu().numpy() * 255.0 + 0.5).astype(np.uint8)
+    Image.fromarray(arr).save(path)
+    return path
+
+
 def _pairing_preview(clip_frame, still_frame, clip_boxes, still_boxes, plan):
     """Both plates side by side: every face outlined and numbered, each pair in one colour,
     every switched-off face struck through.
@@ -280,7 +296,7 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
 
     lines.append(_line("written", job_dir))
     lines.append(_line("", f"{plan_store.PLAN_FILENAME} + {refs} subject reference"
-                           f" file(s)"))
+                           f" file(s) + {plan_store.PREVIEW_FILENAME}"))
     if notes:
         lines.append(_line("notes", ""))
         lines.extend(_line("", f"- {note}") for note in notes)
@@ -510,6 +526,11 @@ class H3MultiFacePlan:
                        "confidence": float(confidence),
                        "clip_source": (str(getattr(images, "h3_video_name", "") or "")
                                        or None)}
+        # #9: the pairing preview is written here too, before the plan is, so a folder that has
+        # a plan also has everything the plan says it wrote. The panel reads this file rather
+        # than drawing anything, which is what lets it stay read-only.
+        preview = _pairing_preview(images[frame], still, clip_boxes, still_boxes, plan)
+        _write_preview_png(os.path.join(job, plan_store.PREVIEW_FILENAME), preview)
         written = plan_store.write_plan(job, plan)
 
         # #8: what the plan decided about faces that found no partner, in the plan module's own
@@ -522,7 +543,6 @@ class H3MultiFacePlan:
                 f"reference still face(s) {', '.join(str(j) for j in unseeded)} are not "
                 f"subjects while subject_source={subject_source}")
 
-        preview = _pairing_preview(images[frame], still, clip_boxes, still_boxes, plan)
         report = _format_report(plan, frames, job, refs, notes + [f"plan: {written}"])
         return (plan, preview, report, int(plan["subject_count"]))
 

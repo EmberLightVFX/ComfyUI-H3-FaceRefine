@@ -166,6 +166,7 @@ def test_a_plan_this_pack_cannot_read_is_named_not_half_read(pack, monkeypatch, 
     assert state["ready"] is False
     assert state["status"] == "bad_plan"
     assert state["has_plan"] is False
+    assert "version" in state["message"]
 
 
 # ----------------------------------------------- the faces that are not subjects
@@ -291,6 +292,4 @@ def test_register_survives_no_server_and_no_routes(pack):
     """`__init__.py` calls this on import. It must not raise when ComfyUI's server is absent,
     exactly as the picker's does."""
     pack.pair_preview_api.register()
-
-    assert "version" in state["message"]
 
