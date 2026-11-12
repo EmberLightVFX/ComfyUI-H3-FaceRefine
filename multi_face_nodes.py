@@ -713,6 +713,19 @@ def _shot_lock(all_boxes, start: int, end: int, face_number: int, match_frame: i
     return None
 
 
+def _plan_match_frame(plan) -> int:
+    """The frame the plan measured its subjects on - the plan's fact, not the payload's.
+
+    #11 review: this used to be copied into the narrowed `H3FACEPICK` as `plan_match_frame`.
+    ADR 0005 promises the tracker the released picker's key set verbatim, so a value the
+    pass needs has to be asked of the plan (or said in the report), not smuggled through a
+    payload that is meant to be indistinguishable from the loader's. -1 when no plan says.
+    """
+    plan = plan if isinstance(plan, dict) else {}
+    return int(plan.get("match_frame",
+                        (plan.get("inputs") or {}).get("match_frame", -1)))
+
+
 def narrow_pick_to_subject(plan, face_pick, subject) -> dict:
     """One subject's `H3FACEPICK`: the clip's boxes untouched, `picks` rewritten for one person.
 
@@ -749,8 +762,7 @@ def narrow_pick_to_subject(plan, face_pick, subject) -> dict:
             f"payload. Re-run H3 Load Video + Face Select."
         )
 
-    match_frame = int((plan or {}).get(
-        "match_frame", ((plan or {}).get("inputs") or {}).get("match_frame", -1)))
+    match_frame = _plan_match_frame(plan)
     if not 0 <= match_frame < frames:
         raise ValueError(
             f"the plan's match frame {match_frame} is outside the {frames} frame(s) this "
@@ -798,13 +810,19 @@ def narrow_pick_to_subject(plan, face_pick, subject) -> dict:
 
     narrowed = dict(face_pick)
     narrowed["picks"] = picks
-    # Informational, for whoever reads a payload while debugging a pass: the tracker itself
-    # reads boxes, confs, segments, picks, detector and confidence, and nothing else.
-    narrowed["select"] = "subject_plan"
-    narrowed["select_index"] = face_number
-    narrowed["rank_by"] = "left_most"
-    narrowed["subject_index"] = int(subject["index"])
-    narrowed["plan_match_frame"] = match_frame
+    # Only keys the payload ALREADY has get new values, and only their values: ADR 0005 hands
+    # the tracker the released picker's key set verbatim (nodes.py:3353), because a payload
+    # with a key `H3FaceSelect` never writes is a different type labelled `H3FACEPICK`. The
+    # tracker reads boxes, confs, segments, picks, frames, src_size, detector and confidence
+    # from it and nothing else (nodes.py:1315-1551), so these three are informational,
+    # re-pointed at this subject - and a payload that arrived without one leaves without it.
+    # Anything the pass has to say about itself lives on the plan or in the report: whose pass
+    # this is is `subject["index"]` (and the node's `subject_index` output), and the frame it
+    # was measured on is the plan's `match_frame`.
+    for key, value in (("select", "subject_plan"), ("select_index", face_number),
+                       ("rank_by", "left_most")):
+        if key in narrowed:
+            narrowed[key] = value
     return narrowed
 
 
@@ -855,11 +873,15 @@ def subject_report(plan, subject, narrowed, job_dir=None, reference_note: str = 
     subjects = (plan or {}).get("subjects") or []
     picks = narrowed.get("picks") or []
     face_number = int(narrowed.get("select_index", 0))
-    match_frame = narrowed.get("plan_match_frame")
+    # The match frame comes from the plan (#11 review): the payload the tracker sees carries
+    # the released picker's keys and nothing else, so the report asks the plan that measured
+    # it rather than reading a key Subject Select invented.
+    match_frame = _plan_match_frame(plan)
     paired = subject.get("still_face") is not None
     on_match = 0
     try:
-        on_match = len((narrowed.get("boxes") or [])[int(match_frame)])
+        if match_frame >= 0:
+            on_match = len((narrowed.get("boxes") or [])[int(match_frame)])
     except (IndexError, TypeError, ValueError):
         on_match = 0
 

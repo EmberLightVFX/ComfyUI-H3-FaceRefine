@@ -52,7 +52,6 @@ def _narrowed(absent_flags, segments=SHOTS, frames: int = FRAMES) -> dict:
         "confidence": 0.35,
         "select": "subject_plan",
         "select_index": 0,
-        "plan_match_frame": 2,
     }
 
 
