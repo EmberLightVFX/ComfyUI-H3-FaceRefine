@@ -708,6 +708,36 @@ def absent_shots(narrowed) -> list:
     return [k + 1 for k, pick in enumerate(narrowed.get("picks") or []) if pick.get("absent")]
 
 
+def read_pass_positions(job_dir, subject):
+    """A subject's checkpointed crop positions, or ``None`` when that pass was never saved.
+
+    Not an error: a first pass has nothing saved yet, and a report that failed on it would make
+    the node unusable the one time the answer is most wanted.
+    """
+    if not job_dir:
+        return None
+    try:
+        return plan_store.read_positions(job_dir, subject)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def shot_account_lines(plan, subject, transform=None, job_dir=None, pick=None) -> tuple:
+    """This subject's shot account as report lines, plus the account itself (#6).
+
+    The wording lives in `plan_store`, so the sentences pinned by the pure tests are the ones a
+    user reads here: which shots this subject is absent from, and each one marked either
+    ``absent_planned`` (the plan leaves them out, and the clip's own pixels stay) or lost (the
+    tracker got there and produced nobody). No widget asks for anything: the crop positions are
+    already wired into H3 Pass Save, and otherwise they are read back from the pass folder.
+    """
+    if transform is None:
+        transform = read_pass_positions(job_dir, subject)
+    account = plan_store.absence_account(plan, subject, transform=transform, pick=pick)
+    return [_line("shots", text) for text in account["lines"]], account
+
+
+
 def subject_report(plan, subject, narrowed, job_dir=None, reference_note: str = "",
                    cursor_note: str = "") -> str:
     """Who was chosen, which frame each shot locks onto, and where the reference is.
@@ -767,6 +797,12 @@ def subject_report(plan, subject, narrowed, job_dir=None, reference_note: str = 
             "absent", f"shot(s) {', '.join(str(k) for k in gone)} left untouched for this "
                       f"subject - they cost no generated frames here, and their faces stay "
                       f"exactly as they are in this pass"))
+    # #6: the same account H3 Pass Save prints, in the one place a user reads before queueing
+    # the pass. Planned absence is the plan's decision and is expected; a lost track is not, and
+    # the two are worded differently so nobody chases a non-problem. If this subject already has
+    # crop positions in the job folder, the tracker's half of the answer is read from them.
+    shot_lines, _account = shot_account_lines(plan, subject, job_dir=job_dir, pick=narrowed)
+    lines.extend(shot_lines)
     return "\n".join(lines)
 
 
@@ -1124,6 +1160,13 @@ class H3PassSave:
         plan_store.record_pass_stage(job, index, name, written)
         complete = 1 if plan_store.pass_is_complete(job, index) else 0
         lines = _checkpoint_report_lines(job, index, name, written, complete, note)
+        # #6: the shot account, now measured against what this pass actually produced. Derived
+        # from the payload already wired - the tracker's transform for stage=crops, otherwise the
+        # crops.json this pass checkpointed earlier - so no widget is added and no saved graph
+        # changes meaning. A planned absence says the clip's pixels were kept on purpose; a lost
+        # track says which shot to look at and which widgets would fix it.
+        shot_lines, _account = shot_account_lines(plan, index, transform=transform, job_dir=job)
+        lines.extend(shot_lines)
         if complete:
             coming = plan_store.next_subject(plan, job)
             nxt = coming["index"] if coming is not None else "none - this job is finished"

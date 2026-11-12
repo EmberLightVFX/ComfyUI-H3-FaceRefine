@@ -66,6 +66,18 @@ _Avoid_: scene, segment (in user-facing copy)
 A subject genuinely not present in a given shot, so those frames keep their original pixels.
 _Avoid_: missing, gap, dropped
 
+**Planned absence**:
+An absence the subject plan chose — a shot with no partner for that subject, marked absent in its pick entry, so the clip's own pixels are kept there. Expected, never a failure.
+_Avoid_: skip, dropout, missing shot
+
+**Lost track**:
+A shot where the tracker was handed the subject and produced nobody for them — identity below threshold, or the face never detected. A failure worth telling the user about, and never to be called an absence.
+_Avoid_: absence, dropout, lost face
+
+**Shot account**:
+One subject's per-shot record of a pass: present, absent (planned), or lost, each with the clip frames it covers. What Subject Select and Pass Save print, so a real absence and a tracking failure cannot be confused.
+_Avoid_: status list, per-shot summary, coverage report
+
 **Pairing**:
 Matching a face in the target clip at the match frame to a face in the reference still, so a subject gains a subject reference.
 _Avoid_: mapping, linking, detection match
