@@ -229,7 +229,8 @@ def test_the_two_kinds_of_non_appearance_are_not_confusable_in_one_report():
 
 def test_a_pass_that_planned_nothing_and_lost_nobody_says_so_plainly():
     transform = _transform([False] * 12, [True] * 12, segments=[(0, 12)])
-    account = ps.absence_account(_plan(), 0, transform=transform, pick=_pick([False]))
+    account = ps.absence_account(_plan(), 0, transform=transform,
+                                 pick=_pick([False], segments=[(0, 12)]))
     assert account["lost"] == [] and account["absent_planned"] == []
     assert account["present"] == [1]
     assert account["lines"] == [] or "every shot" in "\n".join(account["lines"])

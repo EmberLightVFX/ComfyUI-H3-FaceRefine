@@ -1097,3 +1097,313 @@ def check_pairing_inputs(stored_plan, current_plan, job_dir, advice: str) -> Non
         f"two pairings into one job folder:\n"
         + "\n".join(f"  - {line}" for line in lines)
         + f"\n{advice}")
+
+
+# ----------------------------------------------------------------------------
+# one subject's shot account: real absence, and the tracker losing them (#6)
+# ----------------------------------------------------------------------------
+#
+# Absence is not invented here. The released payload already says "this person is not in this
+# shot" with a pick entry `{"absent": true, "segment": [start, end]}` (nodes.py:1334): no frame
+# of that shot gets a subject, the crop there is a centred box of padding rather than a face
+# (nodes.py:1747), and the composite fades out across it, leaving the target clip's own pixels.
+# What was missing is the read-out: WHICH shot dropped WHICH subject, over which frames of the
+# clip, and whether that shot is empty because the plan said so or because the tracker lost the
+# face. Only one of those is worth fixing, so they cannot share a sentence.
+#
+# The evidence sits in the crop-position record (`H3FACEXFORM`, built at nodes.py:1908). Every
+# list in it is per KEPT frame, in crop order:
+#
+#   "source"        which clip frame each kept crop came from
+#   "segments"      the shot boundaries, in CROP index space (nodes.py:1898) - so they are not
+#                   frame numbers once anything has been dropped
+#   "absent"        this frame sits in a shot the pick marked absent
+#   "detected"      the tracker resolved this subject's face on this frame
+#
+# Frames dropped out of the batch (nodes.py:1792) never appear in `source` at all, and the
+# tracker only ever drops frames it already marked absent - so a gap in `source` is absence,
+# never a lost subject. Frames the tracker reached with the subject selected and produced
+# nobody for are the opposite: `absent` false, `detected` false.
+
+SHOT_PAIRED = "paired"
+SHOT_ABSENT_PLANNED = "absent_planned"
+SHOT_LOST = "lost"
+
+# The two ways a report can end. Deliberately different: one tells the user nothing is wrong,
+# the other names the widgets that would fix it.
+ABSENT_ACTION = ("original pixels are kept there, which is the intended result for an absence - "
+                 "if this person IS in this shot, plan on a match frame they share with the "
+                 "reference still, or name them with Pick faces")
+LOST_ACTION = ("the tracker stopped finding them there - check identity_track and "
+               "identity_threshold, or lower confidence, on H3 Face Track + Crop")
+
+
+def _subject_number(subject) -> int:
+    """The subject number, whether it arrives as a number or as the plan's subject entry."""
+    if isinstance(subject, dict):
+        return _subject_index(subject.get("index"))
+    return _subject_index(subject)
+
+
+def _plan_subject_entry(plan, index: int) -> dict:
+    for entry in (plan or {}).get("subjects") or []:
+        if isinstance(entry, dict) and int(entry.get("index", -1)) == index:
+            return entry
+    return {"index": index}
+
+
+def _checked_positions(transform) -> dict:
+    """The crop-position record, or a plain refusal. ``None`` means no pass has run yet."""
+    if transform is None:
+        return {}
+    if not isinstance(transform, dict):
+        raise ValueError(
+            "crop positions (H3FACEXFORM) are a dict of per-frame lists - H3 Face Track + "
+            f"Crop's transform output, or the pass folder's crops.json - got "
+            f"{type(transform).__name__}")
+    return transform
+
+
+def _clip_frame_count(plan, transform, pick) -> int:
+    """How many frames the clip has, from whichever payload knows."""
+    transform = _checked_positions(transform)
+    for value in ((transform.get("source_frames")),
+                  (((plan or {}).get("run") or {}).get("frames")),
+                  ((pick or {}).get("frames"))):
+        try:
+            count = int(value)
+        except (TypeError, ValueError):
+            continue
+        if count > 0:
+            return count
+    source = (transform or {}).get("source") or []
+    return len(source)
+
+
+def _frame_evidence(transform, total: int) -> dict:
+    """Clip frame -> what this pass produced there. Empty when there are no crop positions.
+
+    Anything that is not a crop-position record is refused rather than guessed at: an account
+    built from the wrong dict would tell a user their subject is fine when it is not.
+    """
+    transform = _checked_positions(transform)
+    if not transform:
+        return {}
+    source = [int(f) for f in (transform.get("source") or [])]
+    absent = list(transform.get("absent") or [])
+    detected = list(transform.get("detected") or [])
+    if not source:
+        # No `source` means one crop per clip frame, in order.
+        source = list(range(max(len(absent), len(detected))))
+    evidence: dict = {}
+    for k, frame in enumerate(source):
+        if not 0 <= frame < total:
+            continue
+        evidence[frame] = {
+            "absent": bool(absent[k]) if k < len(absent) else False,
+            # No flag at all is not a lost subject. Only what the tracker DID say about a
+            # frame can be evidence of a failure.
+            "detected": bool(detected[k]) if k < len(detected) else True,
+        }
+    return evidence
+
+
+def _shot_ranges(transform, pick, total: int) -> list:
+    """(shot number, first frame, last frame) - inclusive, in the CLIP's frame numbers.
+
+    The pick payload's segments are already clip frames, so when it is wired it wins and the
+    shot numbers match the ones Subject Select prints. Crop positions alone carry shot bounds in
+    CROP index space, so their starts are read back through `source`, and each shot runs to the
+    frame before the next one starts: the shots tile the clip, so frames dropped out of the
+    batch land inside whichever shot they belong to instead of vanishing from the report.
+    """
+    if pick:
+        given = [(int(a), int(b)) for a, b in (pick.get("segments") or [])]
+        ranges = [(k + 1, max(0, a), min(total, b) - 1)
+                  for k, (a, b) in enumerate(given) if b > a]
+        if ranges:
+            return ranges
+
+    source = [int(f) for f in ((transform or {}).get("source") or [])]
+    if not source:
+        source = list(range(len(((transform or {}).get("absent") or []))))
+    starts = []
+    for a, b in [(int(x), int(y)) for x, y in ((transform or {}).get("segments") or [])]:
+        inside = [source[i] for i in range(max(0, a), min(len(source), b))]
+        if inside:
+            starts.append(min(inside))
+    starts = sorted(set(starts))
+    if not starts:
+        return [(1, 0, max(0, total - 1))]
+    ranges = []
+    for k, start in enumerate(starts):
+        end = starts[k + 1] - 1 if k + 1 < len(starts) else total - 1
+        ranges.append((k + 1, max(0, start), max(start, end)))
+    if ranges[0][1] > 0:
+        # Leading frames dropped out of the batch belong to the first shot, not to a phantom
+        # shot of their own.
+        ranges[0] = (ranges[0][0], 0, ranges[0][2])
+    return ranges
+
+
+def _lost_reason(pick, lost_frames) -> str:
+    """Why nobody was produced for these frames, as far as the payloads can tell.
+
+    A lost subject has two causes and the user fixes them differently, so the pick payload's
+    boxes are read: a shot that never held as many faces as this subject's NUMBER had nobody to
+    detect there, while a shot that held plenty of faces lost this subject's identity.
+    """
+    boxes = (pick or {}).get("boxes") or []
+    if not boxes:
+        return ("the tracker reached this shot with this subject selected and produced no "
+                "subject for those frames - their identity fell below the threshold, or the "
+                "face was never detected")
+    number = int((pick or {}).get("select_index", 0) or 0)
+    widest = max((len(boxes[f]) for f in lost_frames if 0 <= f < len(boxes)), default=0)
+    if widest <= number:
+        return (f"no face was detected in this shot at this subject's position - the detector "
+                f"reported at most {widest} face(s) there, so there was nobody to track")
+    return ("faces were detected in this shot but none of them matched this subject - their "
+            "identity fell below the threshold")
+
+
+def _absent_reason(entry, pick, shot_number: int, dropped: int) -> str:
+    """Why this shot holds no subject for them, and who decided that."""
+    picks = (pick or {}).get("picks") or []
+    index = shot_number - 1
+    planned = bool(picks[index].get("absent")) if 0 <= index < len(picks) else False
+    if planned:
+        return ("the plan put an absent entry on this shot - no frame of it shows this subject, "
+                "so there is nobody here for the pass to refine")
+    if dropped and not picks:
+        return ("every frame of this shot was marked absent and dropped out of the batch, so "
+                "the tracker was never asked for a face there")
+    return ("the tracker's absent-shot check found none of this subject's identity in this shot "
+            "and marked the whole shot absent")
+
+
+def shot_account(plan=None, subject=None, transform=None, pick=None) -> list:
+    """This subject's state in every shot of one pass, in shot order.
+
+    Three answers, and the difference between the last two is the point:
+
+    ``paired``          the pass has a subject for that shot;
+    ``absent_planned``  the plan (or the clip's own picks, or the tracker's absent-shot check)
+                        put an absent entry there. Expected: those frames keep the clip's own
+                        pixels, and that is the released behaviour, not a failure;
+    ``lost``            the tracker reached the shot with this subject selected and produced
+                        nobody for them. A failure worth telling the user about.
+
+    Frame ranges are the clip's frame numbers, inclusive, so they line up with what a scrubbing
+    timeline shows. A shot that was marked absent AND dropped out of the batch is still named:
+    the user cannot see dropped frames, so a report that only covered the kept ones would hide
+    the absence entirely.
+    """
+    index = _subject_number(subject)
+    entry = _plan_subject_entry(plan, index)
+    transform = _checked_positions(transform)
+    total = _clip_frame_count(plan, transform, pick)
+    evidence = _frame_evidence(transform, total)
+    picks = (pick or {}).get("picks") or []
+    shots = []
+    for number, start, end in _shot_ranges(transform, pick, total):
+        frames = list(range(start, end + 1))
+        kept = [f for f in frames if f in evidence]
+        absent = [f for f in kept if evidence[f]["absent"]]
+        lost = [f for f in kept
+                if not evidence[f]["absent"] and not evidence[f]["detected"]]
+        present = [f for f in kept
+                   if not evidence[f]["absent"] and evidence[f]["detected"]]
+        dropped = [f for f in frames if transform and f not in evidence]
+        pick_entry = picks[number - 1] if 0 <= number - 1 < len(picks) else None
+        planned = bool(pick_entry.get("absent")) if pick_entry else False
+
+        if lost:
+            state = SHOT_LOST
+        elif present:
+            state = SHOT_PAIRED
+        elif absent or dropped or planned:
+            state = SHOT_ABSENT_PLANNED
+        else:
+            state = SHOT_PAIRED
+
+        record = {
+            "shot": number,
+            "start": start, "end": end, "frames": end - start + 1,
+            "state": state,
+            "frames_present": len(present), "frames_absent": len(absent),
+            "frames_lost": len(lost), "frames_dropped": len(dropped),
+            "planned_by_pick": planned,
+            "reason": "", "action": "",
+        }
+        if state == SHOT_LOST:
+            record["lost_start"], record["lost_end"] = lost[0], lost[-1]
+            record["reason"] = _lost_reason(pick, lost)
+            record["action"] = LOST_ACTION
+        elif state == SHOT_ABSENT_PLANNED:
+            record["reason"] = _absent_reason(entry, pick, number, len(dropped))
+            record["action"] = ABSENT_ACTION
+        elif absent or dropped:
+            record["reason"] = (f"{len(absent) + len(dropped)} of {record['frames']} frame(s) "
+                                f"of this shot were absent; the rest were refined")
+            record["action"] = ("the absent frames inside this shot keep the clip's own pixels, "
+                                "so only part of this shot was refined")
+        shots.append(record)
+    return shots
+
+
+def absence_lines(shots, subject) -> list:
+    """The report lines, worded so an editor can act on them without reading code.
+
+    An absence and a lost track never share a sentence shape: one says the original pixels were
+    kept and that this is the intended result, the other says the tracker stopped finding them
+    and names the widgets to change. Both name the shot and its frame range, because the thing
+    being checked is a moment in the clip.
+    """
+    index = _subject_number(subject)
+    lines = []
+    for shot in shots:
+        where = f"shot {shot['shot']} (frames {shot['start']}-{shot['end']})"
+        state = shot["state"]
+        if state == SHOT_ABSENT_PLANNED:
+            lines.append(f"subject {index} is not in {where}: {shot['reason']} - "
+                         f"{ABSENT_ACTION}")
+        elif state == SHOT_LOST:
+            span = (f"{shot['frames_lost']} of {shot['frames']} frame(s)"
+                    + (f" (frames {shot['lost_start']}-{shot['lost_end']})"
+                       if (shot["lost_start"], shot["lost_end"]) != (shot["start"], shot["end"])
+                       else ""))
+            lines.append(f"subject {index} was lost in {where}: {span} produced nobody - "
+                         f"{shot['reason']} - {LOST_ACTION}")
+        elif shot["frames_absent"] or shot["frames_dropped"]:
+            lines.append(f"subject {index} is partly absent inside {where}: {shot['reason']} - "
+                         f"{shot['action']}")
+    if not lines:
+        lines.append(f"subject {index} is in every shot of this pass - no absence, nothing lost")
+    return lines
+
+
+def absence_account(plan=None, subject=None, transform=None, pick=None) -> dict:
+    """One subject's per-shot account of a pass: the shots, the rollup, and the wording.
+
+    ``transform`` is a pass's crop positions (the tracker's ``H3FACEXFORM``, or a checkpointed
+    pass's ``crops.json``) and says what actually happened; ``pick`` is a narrowed
+    ``H3FACEPICK`` and says what was PLANNED, plus which frames the detector saw at all. Either
+    alone gives a partial account - Subject Select runs before the tracker, so it can only know
+    the planned half unless this subject's crop positions are already in the job folder - and
+    both together give the whole one.
+    """
+    index = _subject_number(subject)
+    shots = shot_account(plan, subject, transform=transform, pick=pick)
+    return {
+        "subject": index,
+        "shots": shots,
+        "present": [s["shot"] for s in shots if s["state"] == SHOT_PAIRED],
+        "absent_planned": [s["shot"] for s in shots if s["state"] == SHOT_ABSENT_PLANNED],
+        "lost": [s["shot"] for s in shots if s["state"] == SHOT_LOST],
+        "lines": absence_lines(shots, index),
+    }
+
+
+
+
