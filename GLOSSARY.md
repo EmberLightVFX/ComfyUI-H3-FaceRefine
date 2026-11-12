@@ -33,6 +33,19 @@ _Avoid_: reference embedding, identity reference
 One refinement run of the pipeline for exactly one subject, ending with that subject composited back into the target clip.
 _Avoid_: iteration, loop, render
 
+**Pass stage**:
+One of the two halves of a pass that get checkpointed into the job folder: `crops` (what H3 was fed, plus their crop positions) and `stitched` (that pass composited back onto the target clip). A pass counts as complete only once its **stitched** stage is recorded.
+_Avoid_: step, phase, checkpoint (that is the act, not the half)
+
+**Pass manifest**:
+The job folder's `manifest.json`: which subjects have which pass stages on disk, and which passes are therefore complete. It is what `next` reads to resume an interrupted job.
+_Avoid_: todo list, state file, progress file
+
+**Pairing fingerprint**:
+The inputs that decide a job's pairing - both plate sizes, the match frame, `subject_source`, the match tolerance, the exclusions, and the subject set itself - compared before any pass reads or writes a job folder, so two pairings never mix into one clip.
+_Avoid_: hash, checksum, signature
+
+
 **Shot**:
 A run of consecutive frames with no cut; face numbering and subject pairing are per shot.
 _Avoid_: scene, segment (in user-facing copy)
