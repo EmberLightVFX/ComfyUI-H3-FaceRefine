@@ -15,7 +15,9 @@ import { api } from "../../scripts/api.js";
 // first clears the plan node's OWN stale artifacts (plan.json -> plan_prev.json, plus the preview
 // and the subject/clip crops) over one narrow, render-guarded route. The panel itself never writes
 // a plan, crop, pairing or pass stage, and pass stages (manifest.json, passes/) are left for the
-// pass/composite nodes' own guards. The interactive re-pairing editor is still a later ticket. The
+// pass/composite nodes' own guards. The panel can also re-point one face's partner to another face
+// (manual pairing) by writing the node's `pair_overrides` widget - the node still re-decides the
+// whole pairing when Process Plan runs, so the panel is never a second source of truth. The
 // panel is its own front end, separate from the face picker's, so the picker stays untouched.
 //
 // It does keep the picker's one rule: while a prompt is running it refuses. The reason here is
@@ -71,6 +73,16 @@ function styleOnce() {
         ".h3pp-cell .h3pp-toggle{margin-top:5px;display:block}",
         ".h3pp-row.off{background:rgba(224,138,138,.14);border-color:#7a4040}",
         ".h3pp-row.off b{color:#e6b3b3}",
+        ".h3pp-facegrid{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}",
+        ".h3pp-face{display:flex;flex-direction:column;gap:3px;align-items:center;border:1px solid #555;",
+        "  border-radius:4px;padding:5px;cursor:pointer;background:#1e1e1e;min-width:96px}",
+        ".h3pp-face:hover{border-color:#888}",
+        ".h3pp-face img{width:88px;max-height:88px;object-fit:contain;background:#111;border-radius:3px}",
+        ".h3pp-face span{font:11px sans-serif;color:#bbb}",
+        ".h3pp-face.cur{border-color:#e0c060;background:#33301f}",
+        ".h3pp-face.cur span{color:#f0c674}",
+        ".h3pp-face.noneopt{color:#ccc;min-width:96px;align-items:center;justify-content:center;",
+        "  font:12px sans-serif}",
     ].join("\n");
     document.head.appendChild(s);
 }
@@ -236,12 +248,117 @@ function applyExclude(node, token, off) {
     return writeExcluded(node, toks);
 }
 
+// Manual re-pairing. Like the include/ignore toggle it edits ONLY a typed widget on the node - here
+// `pair_overrides` - so the panel never authors the pairing itself: the plan node re-decides the
+// whole thing when Process Plan runs. A token is `face=partner`: a face is a bare clip number or an
+// `s`-prefixed reference-still number, exactly as excluded_faces and the preview number them, and
+// the partner is another face on the other plate or the word `none`.
+function pairOverrideTokens(node) {
+    const wd = w(node, "pair_overrides");
+    if (!wd) return null;
+    const raw = (wd.value === null || wd.value === undefined) ? "" : String(wd.value);
+    return { wd, tokens: raw.split(",").map((t) => t.trim()).filter((t) => t.length) };
+}
+
+function writePairOverrides(node, tokens) {
+    const info = pairOverrideTokens(node);
+    if (!info) return "";
+    const seen = new Set();
+    const out = [];
+    for (const t of tokens) {
+        const s = String(t);
+        if (s && !seen.has(s)) { seen.add(s); out.push(s); }
+    }
+    info.wd.value = out.join(", ");
+    try { if (node.setDirtyValue) node.setDirtyValue(); } catch (e) {}
+    try { if (node.dirtyWidget) node.dirtyWidget(info.wd); } catch (e) {}
+    try { app.setDirtyCanvas(true, true); } catch (e) {}
+    return info.wd.value;
+}
+
+// Set faceToken's partner. Drop every entry that names faceToken on EITHER side first, so a face
+// never ends up with two partners in the widget; then add the new one unless the partner is null.
+function applyPairOverride(node, faceToken, partnerToken) {
+    const info = pairOverrideTokens(node);
+    if (!info) return "";
+    faceToken = String(faceToken);
+    const kept = info.tokens.filter((t) => {
+        const eq = t.split("=");
+        return (eq[0] || "").trim() !== faceToken && (eq[1] || "").trim() !== faceToken;
+    });
+    if (partnerToken !== null && partnerToken !== undefined) kept.push(faceToken + "=" + partnerToken);
+    return writePairOverrides(node, kept);
+}
+
+function faceCell(face, currentToken, onPick) {
+    const cell = el("div", "h3pp-face");
+    if (face.thumb_url) {
+        const img = el("img");
+        img.src = api.apiURL(face.thumb_url);
+        img.alt = tokenLabel(face.token);
+        cell.appendChild(img);
+    }
+    cell.appendChild(el("span", null, tokenLabel(face.token)));
+    if (face.token === currentToken) cell.classList.add("cur");
+    cell.onclick = onPick;
+    return cell;
+}
+
+// The re-pairing grid: press a subject's face and choose, per plate, which face it should be
+// matched to. The reference side lists every reference still face; the clip side lists every
+// target clip face; each also offers "no partner". A pick writes the widget and the caller shows
+// the "press Process Plan to apply" hint.
+function openRePairGrid(node, data, subject, apply) {
+    const g = dialog("Re-pair - subject " + subject.index);
+    g.body.appendChild(el("p", "h3pp-note",
+        "Choose which face each side of this subject is matched to. The reference side picks the "
+        + "REFERENCE STILL face; the clip side picks the TARGET CLIP face. 'no partner' switches "
+        + "that side's partner off. This writes the node's pair_overrides widget - press Process "
+        + "Plan to apply it, and note it re-pairs the whole job, so its passes must be re-run."));
+
+    const pick = (faceToken) => (token) => { g.close(); apply(faceToken, token); };
+
+    if (subject.clip_face !== null && subject.clip_face !== undefined) {
+        const faceToken = String(subject.clip_face);
+        const cur = (subject.still_face === null || subject.still_face === undefined)
+            ? null : "s" + subject.still_face;
+        g.body.appendChild(el("h4", "h3pp-sect", "reference (a REFERENCE STILL face)"));
+        const grid = el("div", "h3pp-facegrid");
+        for (const f of (data.still_faces || [])) grid.appendChild(faceCell(f, cur, pick(faceToken)(f.token)));
+        const none = el("button", "h3pp-face noneopt", "no partner");
+        none.onclick = pick(faceToken)("none");
+        grid.appendChild(none);
+        g.body.appendChild(grid);
+    }
+
+    if (subject.still_face !== null && subject.still_face !== undefined) {
+        const faceToken = "s" + subject.still_face;
+        const cur = (subject.clip_face === null || subject.clip_face === undefined)
+            ? null : String(subject.clip_face);
+        g.body.appendChild(el("h4", "h3pp-sect", "clip side (a TARGET CLIP face)"));
+        const grid = el("div", "h3pp-facegrid");
+        for (const f of (data.clip_faces || [])) grid.appendChild(faceCell(f, cur, pick(faceToken)(f.token)));
+        const none = el("button", "h3pp-face noneopt", "no partner");
+        none.onclick = pick(faceToken)("none");
+        grid.appendChild(none);
+        g.body.appendChild(grid);
+    }
+
+    if ((subject.clip_face === null || subject.clip_face === undefined)
+            && (subject.still_face === null || subject.still_face === undefined)) {
+        g.body.appendChild(el("p", "h3pp-note", "this face has neither a clip face nor a still face to re-pair."));
+    }
+
+    g.foot.appendChild(button("Close", "", g.close));
+}
+
 function render(d, data, node, name) {
     d.body.innerHTML = "";
     d.foot.innerHTML = "";
     d.foot.appendChild(el("span", "h3pp-msg",
-        "the toggles edit only the node's excluded_faces widget. Process Plan re-runs the node "
-        + "into job_name and REPLACES its plan (the previous plan.json is kept as plan_prev.json)"));
+        "toggles edit the node's excluded_faces widget; Re-pair edits its pair_overrides widget. "
+        + "Process Plan re-runs the node into job_name and REPLACES its plan (the previous "
+        + "plan.json is kept as plan_prev.json)"));
     const refresh = button("Refresh", "", () => { d.close(); openPanel(node, name); });
 
     if (!data.ready) {
@@ -318,6 +435,18 @@ function render(d, data, node, name) {
                     d.msg.textContent = "excluded_faces on the node is now '" + now +
                         "' - press Process Plan to apply (this panel still shows the last plan).";
                 }));
+        }
+        const canRePair = (s.clip_face !== null && s.clip_face !== undefined)
+            || (s.still_face !== null && s.still_face !== undefined);
+        if (canRePair) {
+            cell.appendChild(button("Re-pair this subject's faces", "h3pp-toggle", () => {
+                openRePairGrid(node, data, s, (faceToken, partnerToken) => {
+                    const now = applyPairOverride(node, faceToken, partnerToken);
+                    render(d, data, node, name);
+                    d.msg.textContent = "pair_overrides on the node is now '" + now +
+                        "' - press Process Plan to apply (this panel still shows the last plan).";
+                });
+            }));
         }
         row.appendChild(cell);
         row.appendChild(cropCell(s));

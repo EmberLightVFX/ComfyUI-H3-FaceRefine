@@ -21,7 +21,7 @@ PACK_ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 WIDGET_ORDER = ["detector", "confidence", "match_frame", "subject_source",
                 "match_tolerance", "excluded_faces", "max_subjects", "job_name",
-                "unmatched_faces", "crop_factor"]
+                "unmatched_faces", "crop_factor", "pair_overrides"]
 
 SUBJECT_WIDGET_ORDER = ["subject"]
 
@@ -99,14 +99,15 @@ def test_the_widget_defaults_are_what_the_feature_promises():
 
 
 def test_the_plan_run_takes_its_inputs_in_schema_order():
-    """ComfyUI calls FUNCTION with the required inputs positionally. `crop_factor` sits at the
+    """ComfyUI calls FUNCTION with the required inputs positionally. The newest widget sits at the
     END of both lists, which is the only place a new widget may go (ADR 0002): `unmatched_faces`
-    was the last entry and stays in twelfth place."""
+    was the last entry and stays in twelfth place; `crop_factor` and `pair_overrides` follow."""
     schema = m.H3MultiFacePlan.INPUT_TYPES()
     args = [p for p in inspect.signature(m.H3MultiFacePlan.run).parameters if p != "self"]
     assert args == list(schema["required"])
-    assert args[-1] == "crop_factor"
-    assert args[-2] == "unmatched_faces"
+    assert args[-1] == "pair_overrides"
+    assert args[-2] == "crop_factor"
+    assert args[-3] == "unmatched_faces"
 
 
 def test_the_crop_factor_widget_is_the_tracker_s_default_and_range():

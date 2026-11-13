@@ -142,6 +142,7 @@ def _empty_state(job_name) -> dict:
         "match_frame": None, "scale": None, "tolerance_px": None,
         "inputs": {}, "counts": {},
         "run": {},
+        "clip_faces": [], "still_faces": [], "pair_overrides": [],
         "preview_file": plan_store.PREVIEW_FILENAME,
         "preview_exists": False, "preview_url": None,
     }
@@ -211,6 +212,56 @@ def _not_subject_row(face) -> dict:
     }
 
 
+def _face_candidate_lists(plan, root, job):
+    """Every face on each plate the re-pairing grid can pick from: number, current partner, and a
+    thumbnail where one already exists (a subject's clip crop, or a subject's crop reference).
+
+    This is hybrid by construction: faces that are already subjects come with the image the plan
+    node cut for them, and a face that never became a subject has no crop on disk, so it renders as
+    a numbered cell and the big preview PNG's numbers carry the rest. The partner shown is the
+    CURRENT one - the pairing after any manual override already in the plan - because that is what
+    the user sees being corrected.
+    """
+    n_clip = len(plan.get("target_boxes") or [])
+    n_still = len(plan.get("still_boxes") or [])
+    pairs = {(int(p["target"])): int(p["still"]) for p in (plan.get("pairs") or [])
+             if p.get("target") is not None and p.get("still") is not None}
+    clip_of_still = {s: c for c, s in pairs.items()}
+
+    def thumb(file_name):
+        if not file_name:
+            return None
+        full = os.path.join(job, str(file_name))
+        return _view_url(root, full) if os.path.isfile(full) else None
+
+    clip_thumb, still_thumb = {}, {}
+    for subject in (plan.get("subjects") or []):
+        cf, sf = subject.get("clip_face"), subject.get("still_face")
+        if cf is not None and subject.get("clip_file"):
+            clip_thumb[int(cf)] = thumb(subject["clip_file"])
+        if (sf is not None and subject.get("ref_kind") == plan_store.REF_CROP
+                and subject.get("ref_file")):
+            still_thumb[int(sf)] = thumb(subject["ref_file"])
+
+    clip_faces = []
+    for i in range(n_clip):
+        st = pairs.get(i)
+        clip_faces.append({
+            "face": i, "token": str(i),
+            "partner_still": st, "partner_token": None if st is None else "s" + str(st),
+            "thumb_url": clip_thumb.get(i),
+        })
+    still_faces = []
+    for j in range(n_still):
+        ct = clip_of_still.get(j)
+        still_faces.append({
+            "face": j, "token": "s" + str(j),
+            "partner_clip": ct, "partner_token": None if ct is None else str(ct),
+            "thumb_url": still_thumb.get(j),
+        })
+    return clip_faces, still_faces
+
+
 def preview_state(job_name) -> dict:
     """Everything the pairing panel shows for one job, read off disk.
 
@@ -274,6 +325,11 @@ def preview_state(job_name) -> dict:
     state["left_out"] = [_not_subject_row(s) for s in (plan.get("left_out") or [])]
     state["capped_out"] = [_not_subject_row(s) for s in (plan.get("capped_out") or [])]
     state["counts"] = plan_store.subject_kind_counts(plan)
+    # What the re-pairing grid can offer: every face on each plate, its current partner, and a
+    # thumbnail where the plan node already cut one. Plus the manual pairings in force, so the
+    # panel can show which faces the user has already re-pointed.
+    state["clip_faces"], state["still_faces"] = _face_candidate_lists(plan, root, job)
+    state["pair_overrides"] = list(inputs.get("pair_overrides") or [])
     state["run"] = dict(plan.get("run") or {})
     # The pairing inputs, read out of the plan rather than off the widgets: this is what the job
     # actually was, which is the only thing worth checking a pairing against.

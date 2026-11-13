@@ -226,11 +226,11 @@ def test_no_cap_into_a_no_cap_folder_is_a_resume(tmp_path):
 # --- the plan format version -----------------------------------------------------------------
 
 def test_a_new_plan_is_written_at_the_current_version():
-    assert ps.PLAN_VERSION == 3
+    assert ps.PLAN_VERSION == 4
     assert _plan()["version"] == ps.PLAN_VERSION
     # Every version a job folder might have been written with stays readable, so an
     # interrupted job survives a pack update rather than being refused for its version number.
-    assert ps.PLAN_READABLE_VERSIONS == (1, 2, ps.PLAN_VERSION)
+    assert ps.PLAN_READABLE_VERSIONS == (1, 2, 3, ps.PLAN_VERSION)
 
 
 def test_a_folder_written_with_the_previous_version_is_read_not_rejected(tmp_path):

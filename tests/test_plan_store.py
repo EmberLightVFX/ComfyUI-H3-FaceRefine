@@ -464,7 +464,9 @@ def test_the_plan_carries_a_version_and_the_pairing_inputs():
                               "max_subjects": 4,
                               "unmatched_faces": ps.DEFAULT_UNMATCHED_FACES,
                               # The rectangle the subject references were cut with (#11 review).
-                              "crop_factor": ps.DEFAULT_CROP_FACTOR}
+                              "crop_factor": ps.DEFAULT_CROP_FACTOR,
+                              # Manual pairings from the pairing panel (#12); empty by default.
+                              "pair_overrides": []}
     assert plan["scale"] == pytest.approx(0.5)
     # The match-frame measurements stay in the plan so a later pass can rebuild one
     # subject's pick without re-detecting anything.
@@ -675,6 +677,81 @@ def test_a_crop_factor_that_cannot_crop_anything_is_refused():
     with pytest.raises(ValueError) as exc:
         _plan(crop_factor=0.0)
     assert "crop_factor" in str(exc.value)
+
+
+# --- manual pairing: the pairing panel's re-pairing editor (#12) ----------------------------
+
+def test_pair_overrides_repoint_one_faces_partner_to_another():
+    """Two faces per plate, auto-paired 0-0 and 1-1. Pointing clip face 0's reference at still
+    face 1 moves that still face under it and frees the face it used to share, so clip face 1
+    now has no partner and falls to whatever unmatched_faces says."""
+    clip = [[100, 100, 200, 220], [400, 100, 500, 220]]
+    still = [[100, 100, 200, 220], [400, 100, 500, 220]]
+    auto = ps.pair_faces(clip, still, (1000, 1000), (1000, 1000), 0.05)
+    assert [(p["target"], p["still"]) for p in auto["pairs"]] == [(0, 0), (1, 1)]
+
+    fixed = ps.apply_pair_overrides(auto, ps.parse_pair_overrides("0=s1"), 2, 2, 0)
+
+    assert [(p["target"], p["still"]) for p in fixed["pairs"]] == [(0, 1)]
+    assert fixed["unpaired_target"] == [1] and fixed["unpaired_still"] == [0]
+    assert fixed["pairs"][0]["manual"] is True
+
+
+def test_pair_overrides_switch_off_keeps_the_face_but_drops_its_partner():
+    """`0=none` is not an exclusion: the face stays a candidate, only its partner is cleared so
+    it falls to unmatched_faces, while every other pair is left exactly as the detector made it."""
+    clip = [[100, 100, 200, 220], [400, 100, 500, 220]]
+    still = [[100, 100, 200, 220], [400, 100, 500, 220]]
+    auto = ps.pair_faces(clip, still, (1000, 1000), (1000, 1000), 0.05)
+    fixed = ps.apply_pair_overrides(auto, ps.parse_pair_overrides("0=none"), 2, 2, 0)
+    assert [(p["target"], p["still"]) for p in fixed["pairs"]] == [(1, 1)]
+    assert fixed["unpaired_target"] == [0] and fixed["unpaired_still"] == [0]
+
+
+def test_pair_overrides_canonicalise_so_either_direction_compares_equal():
+    """`0=s1` and `s1=0` are one pairing written from either plate; the fingerprint must see one
+    answer so a re-plan is not refused for spelling."""
+    assert ps.pair_override_tokens(ps.parse_pair_overrides("0=s1")) == ["0=s1"]
+    assert ps.pair_override_tokens(ps.parse_pair_overrides("s1=0")) == ["0=s1"]
+    assert ps.pair_override_tokens(ps.parse_pair_overrides("s1=none")) == ["s1=none"]
+    assert ps.pair_override_tokens(ps.parse_pair_overrides("2=none")) == ["2=none"]
+
+
+def test_pair_overrides_survive_the_plan_and_the_fingerprint_calls_a_change_a_different_job(tmp_path):
+    """A corrected pairing is remembered in plan.json, and a folder planned without it cannot be
+    resumed with it - that would composite two pairings into one clip."""
+    job = os.path.join(str(tmp_path), "job")
+    ps.write_plan(job, _plan())
+    assert _plan()["inputs"]["pair_overrides"] == []
+    assert _plan(pair_overrides="0=s1")["inputs"]["pair_overrides"] == ["0=s1"]
+
+    lines = ps.fingerprint_difference(ps.read_plan(job), _plan(pair_overrides="0=s1"))
+    assert any(line.startswith("pair_overrides:") for line in lines)
+
+    ps.write_plan(job, _plan(pair_overrides="0=s1"))
+    assert ps.fingerprint_difference(ps.read_plan(job), _plan(pair_overrides="0=s1")) == []
+
+
+def test_an_out_of_range_or_illegal_pair_override_is_refused():
+    clip = [[100, 100, 200, 220]]
+    still = [[100, 100, 200, 220]]
+    auto = ps.pair_faces(clip, still, (1000, 1000), (1000, 1000), 0.05)
+    with pytest.raises(ValueError) as exc:
+        ps.apply_pair_overrides(auto, ps.parse_pair_overrides("0=s5"), 1, 1, 0)
+    assert "reference still" in str(exc.value)
+    with pytest.raises(ValueError):
+        ps.parse_pair_overrides("0=1")           # two faces on the target clip
+    with pytest.raises(ValueError):
+        ps.parse_pair_overrides("oops")          # not a pairing at all
+
+
+def test_no_pair_overrides_leave_the_pairing_untouched():
+    """The default path must stay byte-identical to before the feature, or every existing job
+    would silently change. Empty overrides return the auto pairing exactly as it came."""
+    clip = [[100, 100, 200, 220], [400, 100, 500, 220]]
+    still = [[100, 100, 200, 220], [400, 100, 500, 220]]
+    auto = ps.pair_faces(clip, still, (1000, 1000), (1000, 1000), 0.05)
+    assert ps.apply_pair_overrides(auto, ps.parse_pair_overrides(""), 2, 2, 0) == auto
 
 
 # --- geometry the plan module owns --------------------------------------------------

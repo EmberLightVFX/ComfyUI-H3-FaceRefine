@@ -30,6 +30,9 @@ import numpy as np
 #      (the tracker takes it from a widget, so it was never the plan's to assume), and
 #      `excluded_faces` can name a face on either plate - a bare number for the target clip,
 #      `s2` for the reference still
+#   4  manual pairing: a plan records the `pair_overrides` the pairing panel set, so re-pointing
+#      one face's partner to a different face - or switching it off with `none` - is one job's
+#      answer, kept in plan.json and compared by the pairing fingerprint
 #
 # Version 1 and 2 stay READABLE rather than migrated or refused for being old. They already recorded
 # `max_subjects` in `inputs` even though nothing acted on it at first, so the honest rule is the cheap
@@ -39,8 +42,8 @@ import numpy as np
 # A version 1/2 folder records no crop_factor because it hard-coded the tracker's shipped default,
 # so `pairing_fingerprint` reads that default back out of it rather than calling it a difference.
 # Anything outside PLAN_READABLE_VERSIONS is refused by number rather than half-read.
-PLAN_VERSION = 3
-PLAN_READABLE_VERSIONS = (1, 2, PLAN_VERSION)
+PLAN_VERSION = 4
+PLAN_READABLE_VERSIONS = (1, 2, 3, PLAN_VERSION)
 PLAN_FILENAME = "plan.json"
 
 # The pairing preview image, written by the plan node into the job folder (#9). It is the same
@@ -570,6 +573,173 @@ def describe_exclusions(excluded) -> str:
     return ", ".join(named)
 
 
+# ----------------------------------------------------------------------------
+# manual pairing: the pairing panel can re-point one face's partner to a different face, or
+# switch it off; the choice is recorded so it survives and is fingerprinted. `excluded_faces`
+# can only switch a face off; manual pairing covers the other failure the panel exists for - a
+# face found on both plates matched to the WRONG partner (close faces in a crowd). The widget
+# records the corrected pairing, the plan applies it over the positional guess, and the
+# fingerprint keeps it from mixing into a folder planned on a different answer. Proximity and
+# overlap are not re-checked here: overruling the positional guess is the whole point.
+# ----------------------------------------------------------------------------
+
+def _override_face(token: str):
+    """A face side of a `pair_overrides` entry: ``0`` -> ``("clip", 0)``, ``s2`` -> ``("still", 2)``.
+
+    The same numbering `excluded_faces` and the pairing preview use: a bare number is a target
+    clip face, an ``s``-prefixed one a reference still face.
+    """
+    if _digits(token):
+        return ("clip", int(token))
+    if token[:1] in ("s", "S") and _digits(token[1:]):
+        return ("still", int(token[1:]))
+    raise ValueError(
+        f"pair_overrides has to pair a face with another face, like '0=s2', or switch one off "
+        f"like '2=none'. {token!r} is not a face number. A target clip face is a bare number; a "
+        f"reference still face is written with an s, like 's2'. The numbers are the ones printed "
+        f"on the pairing preview.")
+
+
+def _override_partner(token: str):
+    """The right side of a `pair_overrides` entry: a face, or `none` to switch the partner off."""
+    if token.lower() in ("none", "-", "off", "no", ""):
+        return ("none", None)
+    return _override_face(token)
+
+
+def parse_pair_overrides(value) -> list:
+    """Read the pair_overrides widget into ``[((plate, n), (plate, n | None)), ...]``.
+
+    ``0=s2`` says clip face 0's reference is still face 2. ``s4=0`` is the same fact written from
+    the other plate. ``2=none`` / ``s3=none`` switch that face's partner off, so the face itself
+    still becomes a subject but falls to whatever `unmatched_faces` says. Empty -> ``[]``. A face
+    may never be paired with a face on its own plate.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        chunks: list = list(value)
+    else:
+        chunks = str(value).replace(";", ",").replace("/", ",").split(",")
+    out: list = []
+    for chunk in chunks:
+        text = str(chunk).strip()
+        if not text:
+            continue
+        if "=" not in text:
+            raise ValueError(
+                f"pair_overrides entries pair one face with another, like '0=s2' (clip face 0's "
+                f"reference is still face 2) or '2=none' (switch clip face 2's partner off). "
+                f"{text!r} has no '='.")
+        left, right = text.split("=", 1)
+        left_desc = _override_face(left.strip())
+        right_desc = _override_partner(right.strip())
+        if left_desc[0] == right_desc[0] and left_desc[0] != "none":
+            raise ValueError(
+                f"pair_overrides entry {text!r} pairs two faces on the same plate. The left names "
+                f"one face and the right names its partner on the OTHER plate, or 'none'.")
+        out.append((left_desc, right_desc))
+    return out
+
+
+def _check_override_face(index: int, n: int, plate: str, match_frame: int) -> None:
+    if index < 0 or index >= n:
+        raise ValueError(
+            f"pair_overrides names {plate} face {index}, but only {n} face(s) were found on the "
+            f"{plate} on frame {match_frame}. The numbers come from the pairing preview, so "
+            f"re-read them after changing detector, confidence or match_frame.")
+
+
+def apply_pair_overrides(pairing, parsed, n_target: int, n_still: int, match_frame: int) -> dict:
+    """Rewrite one automatic pairing so the user's manual choices win, one face to one partner.
+
+    Start from the automatic pairs, drop every pair that touches a face named on either side of any
+    override - so re-pointing a face also frees whoever it used to be paired with - then add the
+    forced pairs and honour the switch-offs. Proximity and overlap are deliberately NOT re-checked:
+    the point of a manual pairing is to overrule the positional guess. Indices are checked against
+    the faces actually found, and an override that hands one face two partners is refused. With no
+    overrides the pairing is returned unchanged, so the default pairing is exactly as before.
+    """
+    if not parsed:
+        return pairing
+    scale, reach = pairing["scale"], pairing["tolerance_px"]
+    auto = {int(p["target"]): p for p in pairing["pairs"]}
+    clip_to_still = {t: int(p["still"]) for t, p in auto.items()}
+
+    forced: list[tuple[int, int]] = []
+    touched_clip: set[int] = set()
+    touched_still: set[int] = set()
+    for (kL, iL), (kR, iR) in parsed:
+        if kL == "clip":
+            touched_clip.add(iL)
+        else:
+            touched_still.add(iL)
+        if kR == "clip":
+            touched_clip.add(iR)
+        elif kR == "still":
+            touched_still.add(iR)
+        if kR != "none":
+            forced.append((iL, iR) if kL == "clip" else (iR, iL))
+
+    for i in touched_clip:
+        _check_override_face(i, n_target, "target clip", match_frame)
+    for j in touched_still:
+        _check_override_face(j, n_still, "reference still", match_frame)
+
+    result = {c: s for c, s in clip_to_still.items()
+              if c not in touched_clip and s not in touched_still}
+    still_taken = set(result.values())
+    for (c, s) in forced:
+        if c in result or s in still_taken:
+            raise ValueError(
+                f"pair_overrides give clip face {c} or reference still face {s} more than one "
+                f"partner - a face can have only one. Give each face a single '=face' or '=none'.")
+        result[c] = s
+        still_taken.add(s)
+
+    new_pairs = []
+    for c in sorted(result):
+        s = result[c]
+        entry = {"target": c, "still": s}
+        if c in auto and int(auto[c]["still"]) == s:
+            entry["distance"] = auto[c].get("distance")
+        else:
+            entry["distance"] = None
+            entry["manual"] = True
+        new_pairs.append(entry)
+    return {"scale": scale, "tolerance_px": reach, "pairs": new_pairs,
+            "unpaired_target": [i for i in range(n_target) if i not in result],
+            "unpaired_still": [j for j in range(n_still) if j not in still_taken]}
+
+
+def pair_override_tokens(parsed) -> list:
+    """The overrides as canonical, sorted widget tokens, so the plan and the fingerprint read one
+    answer however the widget was typed. ``0=s2`` and ``s2=0`` both become ``0=s2``; a switch-off
+    keeps the plate it names (``2=none``, ``s3=none``)."""
+    out = set()
+    for (kL, iL), (kR, iR) in parsed:
+        left = str(iL) if kL == "clip" else STILL_FACE_PREFIX + str(iL)
+        if kR == "none":
+            out.add(f"{left}=none")
+            continue
+        right = str(iR) if kR == "clip" else STILL_FACE_PREFIX + str(iR)
+        out.add(f"{left}={right}" if kL == "clip" else f"{right}={left}")
+    return sorted(out)
+
+
+def describe_pair_overrides(parsed) -> str:
+    """The manual pairings in words for the report: ``clip face 0 -> reference still face 2``."""
+    parts = []
+    for (kL, iL), (kR, iR) in parsed:
+        left = f"clip face {iL}" if kL == "clip" else f"reference still face {iL}"
+        if kR == "none":
+            parts.append(f"{left} switched off (no partner)")
+        else:
+            right = f"clip face {iR}" if kR == "clip" else f"reference still face {iR}"
+            parts.append(f"{left} -> {right}")
+    return "; ".join(parts)
+
+
 def _confs(values, n: int) -> list[float]:
     """Detector score per face. A detector that reports none reads as 1.0, as in nodes.py."""
     out = [float(v) for v in (values or [])][:n]
@@ -607,7 +777,7 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
                        subject_source: str = "union", tolerance: float = 0.05,
                        excluded=(), max_subjects: int = 0,
                        unmatched_faces: str = DEFAULT_UNMATCHED_FACES,
-                       crop_factor: float = DEFAULT_CROP_FACTOR) -> dict:
+                       crop_factor: float = DEFAULT_CROP_FACTOR, pair_overrides=()) -> dict:
     """Settle who the subjects of this job are, as a plain JSON-serialisable dict.
 
     Both plates were detected on the match frame, so pairing is the positional kind
@@ -673,7 +843,13 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     off_clip, off_still = exclusion_plates(excluded_faces)
     off_clip, off_still = set(off_clip), set(off_still)
 
-    pairing = pair_faces(clip, still, (tw, th), (sw, sh), tolerance)
+    overrides = parse_pair_overrides(pair_overrides)
+    # The positional guess first, then the user's manual corrections win over it: re-pointing a
+    # face frees its old partner too, so the result is always a clean one-to-one pairing. With no
+    # overrides `apply_pair_overrides` returns the pairing untouched.
+    pairing = apply_pair_overrides(
+        pair_faces(clip, still, (tw, th), (sw, sh), tolerance),
+        overrides, len(clip), len(still), frame)
     scale = pairing["scale"]
     still_in_clip = still * scale if len(still) else still
     still_of = {p["target"]: p["still"] for p in pairing["pairs"]}
@@ -826,6 +1002,9 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
             # subject reference in this job was cut with - and the passes read that
             # rectangle back from the plan rather than re-guessing it.
             "crop_factor": float(factor),
+            # The manual pairings the panel set, canonicalised so they survive a round trip and
+            # the fingerprint compares one answer however the widget was typed.
+            "pair_overrides": pair_override_tokens(overrides),
         },
         # What the match frame measured, kept so a later pass can rebuild one subject's
         # pick payload without re-detecting anything or loading the still again.
@@ -1669,7 +1848,7 @@ PAIRING_INPUT_FIELDS = ("target_size", "still_size", "match_frame", "subject_sou
                         # #11 review: the crop factor decides the rectangle every subject
                         # reference in the folder was cut with, so a plan at another factor is a
                         # different job even when the pairing itself is identical.
-                        "crop_factor")
+                        "crop_factor", "pair_overrides")
 
 # What the match frame actually MEASURED (#11 review). The subject indices say who was paired;
 # these say which detections that pairing came from. A different still of the same size, or a
