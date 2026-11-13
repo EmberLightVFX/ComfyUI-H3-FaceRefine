@@ -1124,6 +1124,34 @@ def _read_reference_png(path):
     return torch.from_numpy(arr).unsqueeze(0)
 
 
+def _raise_reference_to_h3_floor(reference):
+    """Make a subject reference big enough for H3 to condition on, if it is not already.
+
+    H3 VAE-encodes the reference with a /16 downsample and a DiT patch conv with a 7-wide
+    kernel, so a crop whose short side gives a latent under 7 crashes the model. A freshly
+    built plan never cuts such a crop (`crop_rect_for_reference` floors the cut), but a job
+    folder cut before that floor - or a still genuinely smaller than the floor - still reaches a
+    pass off disk, so the IMAGE itself is lifted to the floor here. This resamples rather than
+    leaving H3 to raise: the identity anchor is the target-clip crop (ADR 0003), the reference
+    is secondary conditioning, so an enlarged reference is a weaker cue, not a broken graph.
+
+    Returns ``(reference, upscaled_bool)``.
+    """
+    import torch
+
+    h, w = int(reference.shape[1]), int(reference.shape[2])
+    edge = int(plan_store.MIN_H3_REF_EDGE)
+    if h >= edge and w >= edge:
+        return reference, False
+    factor = max(edge / float(h), edge / float(w))
+    nh, nw = max(edge, int(round(h * factor))), max(edge, int(round(w * factor)))
+    img = reference.permute(0, 3, 1, 2)  # IMAGE is [B,H,W,C] -> [B,C,H,W] for interpolate
+    img = torch.nn.functional.interpolate(img.float(), size=(nh, nw),
+                                          mode="bicubic", align_corners=False)
+    img = img.clamp_(0.0, 1.0).permute(0, 2, 3, 1).contiguous()
+    return img, True
+
+
 def load_subject_reference(job_dir, subject):
     """``(IMAGE or None, 1/0, what the report says about it)``.
 
@@ -1150,16 +1178,21 @@ def load_subject_reference(job_dir, subject):
                          f"on disk, so this pass runs with nothing wired into H3's reference "
                          f"slots")
     reference = _read_reference_png(path)
+    reference, upscaled = _raise_reference_to_h3_floor(reference)
     size = f"{int(reference.shape[2])}x{int(reference.shape[1])}px"
+    bump = "" if not upscaled else (
+        f"   NOTE: the saved crop was under H3's minimum reference size "
+        f"({plan_store.MIN_H3_REF_EDGE}px), so it was enlarged to that floor - a smaller one "
+        f"would crash H3's reference encode, and the still held no more detail at that face")
     if kind == plan_store.REF_STILL:
         # The whole still went in, so the whole still comes back out (#8): same file
         # convention, same read path, whole-frame conditioning instead of a face.
         return (reference, 1,
                 f"{name}   the WHOLE reference still, {size}, read from the job folder - the "
-                f"conditioning is whole-frame, so H3 chooses which face in it to apply")
+                f"conditioning is whole-frame, so H3 chooses which face in it to apply" + bump)
     return (reference, 1,
             f"{name}   {size}, read from the job folder - the reference still is not loaded "
-            f"again")
+            f"again" + bump)
 
 
 class H3SubjectSelect:

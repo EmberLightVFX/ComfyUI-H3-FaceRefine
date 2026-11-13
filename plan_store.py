@@ -300,6 +300,14 @@ def tracker_rect(face_box, frame_size, crop_factor: float = DEFAULT_CROP_FACTOR,
     return [float(x), float(y), float(bw), float(bh)]
 
 
+# H3 cannot condition on a tiny picture: it VAE-encodes the reference with a /16 spatial
+# downsample and a DiT patch conv whose kernel is 7 wide, so a reference whose short side gives
+# a latent under 7 crashes the model ("kernel size can't be greater than actual input size").
+# 128 px is the smallest crop whose /16 latent (8) clears that with margin, so every cut subject
+# reference is kept at or above it (see crop_rect_for_reference, load_subject_reference).
+MIN_H3_REF_EDGE = 128
+
+
 def crop_rect_for_reference(subject_rect, still_size, target_size) -> list[int]:
     """The rectangle to cut out of the reference still for one subject's reference.
 
@@ -310,6 +318,13 @@ def crop_rect_for_reference(subject_rect, still_size, target_size) -> list[int]:
     smaller than the clip the cut shrinks with it, and a rect wider than the still is
     clamped to the still: anything else would hand H3 detail the still never had, dressed
     up as sharpness.
+
+    A floor is applied instead: H3 cannot condition on a picture whose short side is below
+    `MIN_H3_REF_EDGE` (its reference VAE downsamples by 16 and a DiT patch conv has a 7-wide
+    kernel, so a too-small reference crashes the model), so the crop WINDOW is widened around
+    the face up to that floor - drawn from the still's own pixels, which is real detail, not
+    interpolation - while never exceeding the still. When the still itself is smaller than the
+    floor this is as large as the cut can get; `load_subject_reference` covers the remainder.
 
     Returns whole still pixels as ``[x, y, w, h]``.
     """
@@ -322,11 +337,21 @@ def crop_rect_for_reference(subject_rect, still_size, target_size) -> list[int]:
     back = 1.0 / scale
     x, y = rect[0] * back, rect[1] * back
     w, h = rect[2] * back, rect[3] * back
+
+    # Widen the crop window to H3's encode floor, centred on the face, before clamping: this
+    # pulls in real still pixels rather than resampling, and only when the still has room.
+    cx, cy = x + w / 2.0, y + h / 2.0
+    floor = float(MIN_H3_REF_EDGE)
+    if w < floor:
+        w = min(floor, float(sw))
+    if h < floor:
+        h = min(floor, float(sh))
+
     # Never more than the still holds: the cut is at native resolution or nothing.
     w = max(1.0, min(w, float(sw)))
     h = max(1.0, min(h, float(sh)))
-    x = min(max(x, 0.0), max(0.0, float(sw) - w))
-    y = min(max(y, 0.0), max(0.0, float(sh) - h))
+    x = min(max(cx - w / 2.0, 0.0), max(0.0, float(sw) - w))
+    y = min(max(cy - h / 2.0, 0.0), max(0.0, float(sh) - h))
 
     wi, hi = max(1, min(int(round(w)), sw)), max(1, min(int(round(h)), sh))
     xi = max(0, min(int(round(x)), sw - wi))
