@@ -91,7 +91,7 @@ A face found at the match frame that the user has switched off, so it never beco
 _Avoid_: disabled face, ignored face, skipped track
 
 **Unpaired face**:
-A face found on one plate at the match frame with no partner on the other. What becomes of it is the plan's `unmatched_faces` setting - leave, no reference, or the whole reference still - decided once, in the plan, because it shapes the subject set.
+A face found on one plate at the match frame with no partner on the other. What becomes of it is the plan's `unmatched_faces` setting — leave, no reference, the whole reference still, or a clip-aligned crop cut from the still at the region where the clip face sits (`clip_region`) — decided once, in the plan, because it shapes the subject set.
 _Avoid_: orphan face, missed match, unmatched subject
 
 **Left-out face**:

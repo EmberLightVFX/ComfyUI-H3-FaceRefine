@@ -1119,11 +1119,11 @@ paying for another detection pass and another track; and the PNGs are ordinary f
 open `passes/subject_0000/crops/` and see exactly what H3 was fed — the fastest way to explain a
 result you did not want.
 
-### `unmatched_faces`: three answers
+### `unmatched_faces`: four answers
 
 A face found on one plate at the match frame with no partner on the other is an **unpaired face**.
 What it becomes is decided here, once, because it changes the **subject set** — and the subject set
-is what the composite is gated on and what the fingerprint compares. The three modes, in the
+is what the composite is gated on and what the fingerprint compares. The four modes, in the
 report's own words:
 
 - **`leave`** (the default): the face is **not a subject at all**. No pass ever runs for it, so it
@@ -1142,10 +1142,19 @@ report's own words:
   written out as `subject_N.png` like any other. The conditioning is whole-frame, so *H3 chooses
   which face in the still it applies* — a face in the still that is not this subject can be the one
   whose detail gets transferred. That is a warning about how H3 works, not a bug to tune out.
+- **`clip_region`**: the face **is** a subject whose **subject reference** is cut from the still at
+  the **region where this clip face sits** — the same `crop` rectangle a paired subject would get,
+  the clip face's tracker box mapped into the still at its native resolution, also written out as
+  `subject_N.png`. It reads `ref_kind: crop` (it is not a detected still face). This is the right
+  region when the still shares the clip's framing — e.g. the reference is a frame grabbed from the
+  same shot, or the person sits at a similar relative spot. When the still is a **different
+  composition** the clip-aligned rectangle lands on the wrong area, so prefer `with_still` there.
+  Use it to refine a face once when a low-confidence detection would otherwise leave it unpaired.
 
 A face that did find its partner is unaffected: `crop` references, pairing and passes are identical
-in all three modes. Read `ref_kind` (`crop | still | none`) rather than whether a reference crop
-exists — a whole-still subject's crop is the full frame.
+in every mode. Read `ref_kind` (`crop | still | none`) rather than whether a reference crop
+exists — a whole-still subject's crop is the full frame, and a `clip_region` subject's is the
+clip face's own rectangle.
 
 ### The refusal sites: why two pairings never share a clip
 

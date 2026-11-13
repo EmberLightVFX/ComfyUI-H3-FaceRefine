@@ -318,6 +318,7 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
         f"{counts[plan_store.KIND_PAIRED]} paired"
         f"   {counts[plan_store.KIND_NO_REFERENCE]} subject(s) with no reference"
         f"   {counts[plan_store.KIND_WHOLE_STILL]} subject(s) on the whole still"
+        f"   {counts[plan_store.KIND_CLIP_REGION]} subject(s) on a clip-aligned still crop"
         f"   {counts[plan_store.KIND_LEFT_OUT]} face(s) left out"))
 
     for subject in plan["subjects"]:
@@ -328,6 +329,11 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
             ref = (f"reference is the WHOLE reference still, {crop[2]}x{crop[3]}px"
                    f" -> {subject['ref_file']}   whole-frame conditioning: H3 picks which face"
                    f" in it to apply")
+        elif (subject["has_reference"] and subject["still_face"] is None
+              and subject.get("ref_kind") == plan_store.REF_CROP):
+            ref = (f"reference cut from the reference still at THIS clip face's region,"
+                   f" {crop[2]}x{crop[3]}px -> {subject['ref_file']}   clip_region: right only if"
+                   f" the still shares the clip's framing")
         elif subject["has_reference"]:
             ref = (f"reference from still face {subject['still_face']},"
                    f" {crop[2]}x{crop[3]}px at the still's native resolution"
@@ -434,6 +440,12 @@ class H3MultiFacePlan:
                                "with_still: a subject whose reference is the WHOLE reference "
                                "still. Conditioning is whole-frame, so H3 chooses which face in "
                                "the still it applies - not a guarantee the right face is used.\n"
+                                "clip_region: a subject whose reference is cut from the still at "
+                                "the region where this clip face sits - the same crop a paired "
+                                "subject gets. Right where the still shares the clip's framing; on "
+                                "a differently framed still it crops the wrong area, so prefer "
+                                "with_still there.\\n"
+
                                "A face that did find its partner is unaffected by this."}),
                 # crop_factor (#11 review) is the LAST entry: it is the newest widget, and ComfyUI
                 # replays saved graphs by position (ADR 0002), so everything older stays exactly
