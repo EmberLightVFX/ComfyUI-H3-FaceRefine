@@ -42,7 +42,7 @@ The job folder's `manifest.json`: which subjects have which pass stages on disk,
 _Avoid_: todo list, state file, progress file
 
 **Pairing fingerprint**:
-The inputs and the evidence that decide a job's pairing — both plate sizes, the match frame, `subject_source`, the match tolerance, the exclusions, `unmatched_faces`, `max_subjects`, the `crop_factor` the subject references were cut at, the boxes both plates measured at the match frame with their scale, the detector and confidence that produced them, and the subject set itself — compared before any pass reads or writes a job folder, so two pairings never mix into one clip.
+The inputs and the evidence that decide a job's pairing — both plate sizes, the match frame, `subject_source`, the match tolerance, the exclusions, the manual `pair_overrides`, `unmatched_faces`, `max_subjects`, the `crop_factor` the subject references were cut at, the boxes both plates measured at the match frame with their scale, the detector and confidence that produced them, and the subject set itself — compared before any pass reads or writes a job folder, so two pairings never mix into one clip.
 _Avoid_: hash, checksum, signature
 
 **Composite order**:
@@ -89,6 +89,10 @@ _Avoid_: face list, track list, plan file (that's where it lives, not what it is
 **Excluded face**:
 A face found at the match frame that the user has switched off, so it never becomes a subject and keeps its original pixels. Named per plate in `excluded_faces`: a bare number is a target clip face, an `s`-prefixed one a reference still face - the only way to switch off a bystander the photo saw and the clip never did.
 _Avoid_: disabled face, ignored face, skipped track
+
+**Manual pairing** (`pair_overrides`):
+A pairing the user over-rode when the automatic positional guess matched the wrong two faces — set from the pairing panel's Re-pair grid or by hand as `face=partner` (`0=s2`, `s1=0`, `2=none`). It replaces the positional pairing before subjects are settled, is recorded in the plan and compared by the pairing fingerprint, and re-pairs the whole job — so that job's passes must be re-run. Not the same as excluding a face: a re-paired face still becomes a subject.
+_Avoid_: re-match, force match, override (too vague)
 
 **Unpaired face**:
 A face found on one plate at the match frame with no partner on the other. What becomes of it is the plan's `unmatched_faces` setting — leave, no reference, the whole reference still, or a clip-aligned crop cut from the still at the region where the clip face sits (`clip_region`) — decided once, in the plan, because it shapes the subject set.

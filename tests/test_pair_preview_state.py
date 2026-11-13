@@ -253,6 +253,32 @@ def test_each_face_row_carries_the_widget_token_that_switches_it_off(pack, monke
     assert [s["exclude_token"] for s in clip_subjects] == [str(s["clip_face"]) for s in clip_subjects]
 
 
+def test_the_state_offers_every_face_for_repairing_and_names_the_overrides_in_force(pack, monkeypatch):
+    """The re-pairing grid needs, per plate, every found face with its CURRENT partner and a
+    thumbnail only where the plan node actually cut one - and the panel must learn which manual
+    pairings are already in force, so it can show the user what they already corrected."""
+    _run(pack, monkeypatch, job_name="re-pair")
+    state = pack.pair_preview_api.preview_state("re-pair")
+
+    clip, still = state["clip_faces"], state["still_faces"]
+    assert clip and still
+    assert [c["face"] for c in clip] == list(range(len(clip)))
+    assert [s["face"] for s in still] == list(range(len(still)))
+    assert all(c["token"] == str(c["face"]) for c in clip)
+    assert all(s["token"] == "s" + str(s["face"]) for s in still)
+    # Nothing corrected yet, and a face `leave` left unpaired has no partner to show.
+    assert state["pair_overrides"] == []
+    assert [c for c in clip if c["face"] == 1][0]["partner_still"] is None
+
+    # A manual pairing now in force: the override is named, and the face that gained a partner
+    # shows it - which is exactly what the grid marks as the current choice.
+    _run(pack, monkeypatch, job_name="re-paired", overrides="1=s0")
+    st2 = pack.pair_preview_api.preview_state("re-paired")
+    assert st2["pair_overrides"] == ["1=s0"]
+    gained = [c for c in st2["clip_faces"] if c["face"] == 1][0]
+    assert gained["partner_still"] == 0 and gained["partner_token"] == "s0"
+
+
 # ---------------------------------------------------------------- wiring, busy
 
 def test_the_pack_init_wires_the_preview_module_next_to_the_picker():

@@ -447,7 +447,8 @@ class H3MultiFacePlan:
                                 "with_still there.\\n"
 
                                "A face that did find its partner is unaffected by this."}),
-                # crop_factor (#11 review) is the LAST entry: it is the newest widget, and ComfyUI
+                # crop_factor (#11 review) is not the newest entry any more - `pair_overrides`
+                # (manual pairing, #12) follows it - but both sit at the end, and ComfyUI
                 # replays saved graphs by position (ADR 0002), so everything older stays exactly
                 # where it was. It is a widget on this node only because the subject reference has
                 # to be cut with the tracker's rectangle; the plan still owns the geometry.
@@ -465,6 +466,25 @@ class H3MultiFacePlan:
                                "preview and a resumed job all measure the crops this job really "
                                "cuts. It joins the pairing fingerprint, because the references "
                                "already in the job folder were cut at the old number."}),
+                # pair_overrides (#12, manual pairing) is the newest widget, so it goes last. It
+                # lets the Pairing preview panel re-point one face's partner to another face when
+                # the automatic pairing matched the wrong two people.
+                "pair_overrides": ("STRING", {
+                    "default": "", "multiline": False,
+                    "tooltip": "Manual pairings, for when the automatic pairing matched the WRONG "
+                               "two faces (close faces in a crowd, a detector that mixed up two "
+                               "people). Set this from the Pairing preview panel's Re-pair grid, "
+                               "or write it by hand: comma-separated, each entry face=partner.\n\n"
+                               "A face is a bare number for the TARGET CLIP or s2 for a REFERENCE "
+                               "STILL face - the same numbers as excluded_faces and the preview. "
+                               "So 0=s2 says clip face 0's reference is still face 2; s1=0 says it "
+                               "the other way round; and 2=none or s3=none switch a face's partner "
+                               "off so it falls to unmatched_faces.\n\n"
+                               "A manual pairing over-rides the positional guess - it need not be "
+                               "near or overlapping. It re-pairs the whole job, so the passes for "
+                               "it must be re-run. Recorded in plan.json and part of the pairing "
+                               "fingerprint, so a changed pairing cannot be mixed into a folder "
+                               "planned without it. A text widget, so it survives a reload."}),
             },
         }
 
@@ -482,7 +502,7 @@ class H3MultiFacePlan:
     def run(self, images, reference_still, detector, confidence, match_frame,
             subject_source, match_tolerance, excluded_faces, max_subjects, job_name,
             unmatched_faces=plan_store.DEFAULT_UNMATCHED_FACES,
-            crop_factor=DEFAULT_CROP_FACTOR):
+            crop_factor=DEFAULT_CROP_FACTOR, pair_overrides: str = ""):
         import folder_paths
         from .nodes import _load_detector, _to_bgr_u8
 
@@ -542,7 +562,7 @@ class H3MultiFacePlan:
             (width, height), (int(still.shape[1]), int(still.shape[0])),
             frame, str(subject_source), float(match_tolerance),
             plan_store.parse_excluded_faces(excluded_faces), int(max_subjects),
-            str(unmatched_faces), float(crop_factor))
+            str(unmatched_faces), float(crop_factor), str(pair_overrides))
 
         if not plan["subjects"]:
             if plan["excluded_faces"]:
@@ -634,6 +654,9 @@ class H3MultiFacePlan:
         # #8: what the plan decided about faces that found no partner, in the plan module's own
         # words - `leave` names every face it left out and says that leaving is not a failure.
         notes.extend(plan_store.unmatched_lines(plan))
+        manual = plan_store.parse_pair_overrides(pair_overrides)
+        if manual:
+            notes.append("manual pairing: " + plan_store.describe_pair_overrides(manual))
         unseeded = [int(j) for j in plan["unpaired_still"]
                     if not any(s["still_face"] == j for s in plan["subjects"])]
         if unseeded:

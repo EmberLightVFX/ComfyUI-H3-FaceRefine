@@ -108,7 +108,7 @@ def pack(tmp_path, monkeypatch):
 
 def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
          excluded="", job_name="group shot", source="union", mode="leave", max_subjects=0,
-         crop_factor=None):
+         crop_factor=None, overrides=""):
     fake = _FakeModel([_Found(CLIP_BOXES, CLIP_CONFS), _Found(still_boxes, STILL_CONFS)])
     monkeypatch.setattr(pack.nodes, "_load_detector", lambda name: fake)
     node = pack.NODE_CLASS_MAPPINGS["H3MultiFacePlan"]()
@@ -117,7 +117,13 @@ def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
     still = torch.zeros((1, int(still_size[1]), int(still_size[0]), 3))
     # crop_factor is the LAST required widget (ADR 0002), so it goes on the end of the call.
     # Left None means "the widget was never touched", which is what a saved graph does.
-    tail = [mode] if crop_factor is None else [mode, crop_factor]
+    # crop_factor and pair_overrides are the last two widgets, so they only reach the call when
+    # given. An override forces crop_factor on too (it sits before it in the widget order).
+    tail = [mode]
+    if crop_factor is not None or overrides:
+        tail.append(crop_factor if crop_factor is not None else 2.5)
+        if overrides:
+            tail.append(overrides)
     return node.run(images, still, "face_yolov8m.pt", 0.35, 2, source, 0.05, excluded,
                     max_subjects, job_name, *tail)
 
@@ -149,6 +155,24 @@ def test_process_plan_replaces_the_plan_after_clearing_stale_artifacts(pack, mon
     prev = job / ps.PLAN_PREV_FILENAME
     assert prev.is_file()
     assert json.loads(prev.read_text(encoding="utf-8"))["inputs"]["unmatched_faces"] == "no_reference"
+
+
+def test_a_manual_pair_override_repairs_a_wrong_pair_and_makes_it_a_subject(pack, monkeypatch):
+    """The middle clip face has no partner in the still, so with the default `leave` it is not a
+    subject at all. The pairing panel's re-pairing editor would fix exactly this: a manual `1=s0`
+    pairs it with a still face anyway (the positional guess need not agree), and the subject set -
+    the thing the panel shows and every pass is cut against - carries the correction."""
+    base, _, _, _ = _run(pack, monkeypatch, job_name="manual base")
+    assert not [s for s in base["subjects"] if s["clip_face"] == 1]   # left out by `leave`
+
+    plan, _, report, _ = _run(pack, monkeypatch, job_name="manual fixed", overrides="1=s0")
+
+    assert (1, 0) in sorted((p["target"], p["still"]) for p in plan["pairs"])
+    made = [s for s in plan["subjects"] if s["clip_face"] == 1]
+    assert made and made[0]["still_face"] == 0 and made[0]["ref_kind"] == "crop"
+    assert made[0]["has_reference"] is True
+    assert "manual pairing" in report
+    assert plan["inputs"]["pair_overrides"] == ["1=s0"]
 
 
 def test_the_plan_node_plans_pairs_and_reports(pack, monkeypatch):
