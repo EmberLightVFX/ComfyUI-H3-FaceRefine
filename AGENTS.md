@@ -24,6 +24,13 @@ Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/ag
 - **Run one subagent at a time. Never spawn two concurrently.** This machine has no GPU
   headroom for two agents working at once. Spawn one, wait for its report, then spawn the
   next. Same rule applies to any two GPU-touching processes (a sample run, a model load).
+- **Check every saved graph with `graph_check.py` before you call it done.** It is pure
+  (`json`/`re`/`plan_store`, no `comfy`), GPU-free, and enforces the pack invariants that
+  ComfyUI's own `validate_workflow` cannot (see Repository facts). Run
+  `gc.check_graph(gc.load_workflow(path))` on any hand-built or user workflow and expect
+  `[]`. The shipped `example_workflows/*.json` are its green fixtures, pinned by
+  `tests/test_graph_check.py`, which `.github/workflows/tests.yml` already runs — that is
+  the review gate for graph work.
 
 ## Repository facts worth knowing before you touch anything
 
@@ -52,5 +59,22 @@ Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/ag
   `.github/workflows/tests.yml` runs them on plain pypi. Tests that drive the released tracker or
   stitch need ComfyUI importable and skip themselves in CI. Never let a test write into the real
   ComfyUI `output` folder — redirect the output root to a tmp dir.
+- **The real output root is**
+  `C:\Users\emberlight\AppData\Local\Comfy-Desktop\ComfyUI-Shared\output` — this is a
+  Comfy **Desktop** install launched with `--output-directory`, so `ComfyUI\output` holds only
+  a placeholder. Any code or test that reads/writes run output must use the Desktop root (and
+  tests must still redirect to a tmp dir, never there).
+- **`graph_check.py` is the repo-side graph checker** (pure: `json`/`re`/`plan_store`, no
+  `comfy`, GPU-free — the same shape as `plan_store.py`). It enforces pack invariants a saved
+  graph can satisfy while staying type-correct and schema-legal, i.e. invisible to
+  `validate_workflow`: the right kind of VAE in each loader socket (video VAE into
+  `VAEDecode`/`H3InjectVideoLatent`/`MiniMaxH3ReferenceToVideo.vae`, audio VAE into the
+  `audio_vae` sockets), `H3PassSave.stage` matching what feeds its `images` socket
+  (tracker→`crops`, stitch→`stitched`), detector + confidence agreeing across
+  `H3FaceSelect`/`H3MultiFacePlan`/`H3FaceTrackCrop`, `BasicScheduler.steps` matching the step
+  count the loaded turbo LoRA names, no orphan nodes, and `H3PassLoad` chaining onto the
+  previous subject in plan order (`chained_from`, when set explicitly, likewise). Read it in
+  via `gc.check_graph(gc.load_workflow(path))`; `tests/test_graph_check.py` pins the shipped
+  templates as clean and each fault as caught.
 - `README.md` is the node reference and is kept in step with the tooltips in `nodes.py`;
   a node change that doesn't update `README.md` is incomplete.
