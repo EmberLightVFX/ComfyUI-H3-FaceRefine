@@ -411,8 +411,11 @@ the stitch can put each refined face back exactly where it belongs.
 
 ### Multi Face — the plan picks the subjects
 
-`H3_Face_Refine_Multi_Face.json` is the Manual Select front end plus the plan: two subjects wired
-end to end, so the chaining is visible in the graph rather than left to be imagined.
+`H3_Face_Refine_Multi_Face.json` is the Manual Select front end plus the plan, wired as **one
+reusable pass chain** that covers any number of subjects: **H3 Subject Select** on `next` walks the
+plan, and **H3 Pass Load** chains each pass onto the previous subject's stitched result (its
+`no_previous` clip carries the first subject). You queue it once per subject rather than copying a
+branch per person.
 
 1. **Point `H3 Load Video + Face Select` at your clip** and set `cut_detection` to
    `auto (pyscenedetect)` if the clip has hard cuts.
@@ -421,15 +424,19 @@ end to end, so the chaining is visible in the graph rather than left to be imagi
 3. **Run the plan node first, on its own.** Read the cost line and the pairing line, and open
    `pairing_preview.png` or press **View pairing preview** to check who was paired with whom. A
    wrong pairing costs one render per subject, so this is the cheapest moment to fix it.
-4. **Queue.** Pass A composites onto the target clip; Pass B composites onto Pass A, through Pass
-   Load. The composite at the end refuses if either pass never landed.
+4. **Queue once per subject.** The single chain refines one subject per queue: **H3 Pass Load**
+   bases this subject's stitch on the previous subject's stitched pass (`previous_subject` from
+   Subject Select), and for the first subject it returns the target clip from its `no_previous`
+   input. The Composite refuses until every subject's stitched stage has landed, so it raises on
+   every queue but the last — the completion gate, not a failure: the pass it waited on is already
+   saved, so the next queue resumes where you left off, and the final queue writes the clip.
 5. **Interrupted?** Queue again with nothing changed: `subject = next` takes the first subject with
    no completed **stitched** pass recorded in the job folder.
 
 The template says which model files it expects on a **Note node in the graph** (`Model files this
 template expects`) rather than burying them in this README, because they sit beside the loaders they
 describe — and it carries a second note on the job folder and the resume rule. Swap the filenames for
-what is in your models folder, and keep `steps` on both `BasicScheduler` nodes matching the turbo
+what is in your models folder, and keep `steps` on the `BasicScheduler` node matching the turbo
 LoRA's step count.
 
 Use this when more than one face in the clip needs work. Accept the cost first: **N subjects is N
@@ -466,7 +473,7 @@ FRONT END, once per job:
                                     │
                           … queue again, `subject = next` moves to the next subject …
 
-  H3 Pass Load (subject = the one before, stream = stitched) ──► that stitch node's base_images
+  H3 Pass Load (subject = Subject Select's previous_subject = the one before; its `no_previous` carries the target clip for the FIRST subject) ──► that stitch node's base_images
 
   H3 Multi-Face Composite (plan, the target clip, overlap_threshold)
         │ refuses unless every subject's stitched stage is in manifest.json
@@ -1360,8 +1367,11 @@ a finished render.
 | Input | Default | What it does |
 |---|---|---|
 | `plan` | - | The same subject plan the pass was saved with. Checked against the folder's `plan.json` first, so a pass cannot be read into a job planned from a different pairing. |
-| `subject` | `0` | Whose pass to read — the number **H3 Pass Save** wrote it under. Wire **H3 Subject Select → `subject_index`** and it cannot drift. |
+| `subject` | `0` | Whose pass to read — the number **H3 Pass Save** wrote it under. Wire **H3 Subject Select → `previous_subject`** into it: the pass chains onto the subject **before** the one being refined. `previous_subject` is `-1` for the FIRST subject (there is no pass before it), and then this node returns `no_previous` instead of reading a pass. A number the plan does not have is refused. |
 | `stream` | `crops` | `crops`: the crops that were fed to H3, with their crop positions — wire them into **H3 Face Stitch**'s `refined_crops` and `transform` to composite a checkpointed pass without re-tracking. `stitched`: the frames that pass composited back onto the clip — wire them into the next subject's `base_images`. |
+| `no_previous` *(opt)* | - | The base to return when `subject` is `-1` — the first subject, which has no previous stitched pass to load. Wire the **target clip** here so a single reusable pass chain composites the first face straight onto the clip; ignored for any other subject. |
+
+**A single reusable chain:** wire **H3 Subject Select → `previous_subject`** into `subject` and the **target clip** into `no_previous`, then `images → H3 Face Stitch → base_images`. Subject Select's `next` walks every subject in turn, so one chain covers any number of people — the first subject bases on the clip, each later subject on the previous subject's stitched result. (Wiring `subject_index` and a fixed subject instead is the hand-chained shape — one branch per subject, chained by hand.) |
 
 **Outputs:** `images`, `transform`, `report`. The `transform` comes back as the payload the tracker
 built — `canvas`, `src_size` and `segments` as tuples — so a checkpoint feeds the released stitch

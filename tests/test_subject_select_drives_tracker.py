@@ -287,9 +287,11 @@ def test_the_node_hands_over_the_narrowed_pick_and_its_subject_reference(tmp_pat
     plan, job = _job_with_references(tmp_path, monkeypatch, _plan(payload), payload,
                                      {0: "subject_0.png", 1: "subject_1.png"})
 
-    pick, reference, exists, index, report = m.H3SubjectSelect().run(plan, payload)
+    pick, reference, exists, index, previous, report = m.H3SubjectSelect().run(plan, payload)
 
     assert index == 0 and exists == 1
+    # subject 0 is first in plan order, so it composites onto the target clip (-1).
+    assert previous == ps.CHAINED_TO_CLIP == -1
     assert len(pick["picks"]) == len(SEGMENTS)
     # ADR 0005: the handed-over payload is the picker's key set, verbatim. Whose pass it is
     # rides on the `subject_index` OUTPUT above, never inside the payload.
@@ -311,9 +313,11 @@ def test_next_moves_on_when_a_pass_is_recorded_complete(tmp_path, monkeypatch):
         json.dump({"version": ps.MANIFEST_VERSION,
                    "passes": {"0": {"complete": True}}}, fh)
 
-    pick, reference, exists, index, report = m.H3SubjectSelect().run(plan, payload)
+    pick, reference, exists, index, previous, report = m.H3SubjectSelect().run(plan, payload)
 
     assert index == 1
+    # subject 1 follows subject 0 in plan order, so it composites onto subject 0.
+    assert previous == 0
     assert reference is None and exists == 0
     assert "no subject reference" in report
     assert "shot" in report

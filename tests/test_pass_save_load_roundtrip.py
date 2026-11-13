@@ -57,6 +57,30 @@ def _job(tmp_path):
     return tmp_path / "output" / "group shot"
 
 
+def test_subject_minus_one_returns_the_no_previous_clip_for_the_first_subject(pack, monkeypatch,
+                                                                             tmp_path):
+    """The single-chain fallback: subject -1 (H3 Subject Select's previous_subject for the first
+    subject) has no previous stitched pass to read, so H3 Pass Load returns the target clip wired
+    into `no_previous` as this pass's base - unchanged."""
+    plan, _, _, _ = _run(pack, monkeypatch)
+    clip = _frames()
+    load = pack.NODE_CLASS_MAPPINGS["H3PassLoad"]()
+    images, transform, report = load.run(plan, -1, "stitched", no_previous=clip)
+    assert torch.equal(images, clip)
+    assert transform is None
+    assert "no_previous" in report
+
+
+def test_subject_minus_one_without_no_previous_wired_refuses(pack, monkeypatch, tmp_path):
+    """Asking for the first subject with no `no_previous` base wired is a wiring error, named as
+    such rather than reading a pass that does not exist."""
+    plan, _, _, _ = _run(pack, monkeypatch)
+    load = pack.NODE_CLASS_MAPPINGS["H3PassLoad"]()
+    with pytest.raises(Exception) as exc:
+        load.run(plan, -1, "stitched")
+    assert "no_previous" in str(exc.value)
+
+
 def test_a_saved_crops_pass_loads_back_as_the_same_frames_in_the_same_order(pack, monkeypatch,
                                                                            tmp_path):
     plan, _, _, _ = _run(pack, monkeypatch)

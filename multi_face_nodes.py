@@ -1171,9 +1171,9 @@ class H3SubjectSelect:
             },
         }
 
-    RETURN_TYPES = (H3FACEPICK, "IMAGE", "INT", "INT", "STRING")
+    RETURN_TYPES = (H3FACEPICK, "IMAGE", "INT", "INT", "INT", "STRING")
     RETURN_NAMES = ("face_pick", "subject_reference", "reference_exists", "subject_index",
-                    "report")
+                    "previous_subject", "report")
     FUNCTION = "run"
     CATEGORY = CATEGORY
 
@@ -1200,7 +1200,13 @@ class H3SubjectSelect:
         report = subject_report(plan, chosen, narrowed, job_dir=job,
                                reference_note=reference_note, cursor_note=cursor)
         print("[H3SubjectSelect] " + report.replace("\n", "\n[H3SubjectSelect] "))
-        return (narrowed, reference, int(exists), int(chosen["index"]), report)
+        # The subject this pass must composite ONTO: the target clip (-1) for the first subject
+        # in plan order, otherwise the previous subject. It comes from the plan, not a per-copy
+        # widget, so a single reusable pass chain can serve any subject: wire this into H3 Pass
+        # Save's `chained_from` and H3 Pass Load's `subject` and the chain configures itself for
+        # whichever subject `next` resolves to. ADR 0006 - the composite checks the same rule.
+        previous = int(_expected_chain_base(plan, int(chosen["index"])))
+        return (narrowed, reference, int(exists), int(chosen["index"]), previous, report)
 
 
 # ----------------------------------------------------------------------------
@@ -1486,9 +1492,14 @@ class H3PassLoad:
                                "against the job folder's plan.json first, so a pass cannot be "
                                "read into a job planned from a different pairing."}),
                 "subject": ("INT", {
-                    "default": 0, "min": 0, "max": MAX_SUBJECT_CHOICES - 1, "step": 1,
+                    "default": 0, "min": plan_store.CHAINED_TO_CLIP,
+                    "max": MAX_SUBJECT_CHOICES - 1, "step": 1,
                     "tooltip": "Which subject's pass to read - the number H3 Pass Save wrote "
-                               "it under."}),
+                               "it under. Wire H3 Subject Select's `previous_subject` here: it is "
+                               "the subject before the one being refined, or -1 for the FIRST "
+                               "subject (no previous pass) - then this node hands back whatever "
+                               "is wired into `no_previous` (the target clip) instead of reading "
+                               "a pass, so one reusable chain can serve every subject."}),
                 "stream": (list(plan_store.PASS_STAGES), {
                     "default": "crops",
                     "tooltip": "crops (default): the crops that were fed to H3, plus their "
@@ -1496,6 +1507,16 @@ class H3PassLoad:
                                "checkpointed pass without re-tracking.\n\n"
                                "stitched: the frames that pass composited back onto the clip. "
                                "Wire this into the next subject's base_images."}),
+            },
+            "optional": {
+                # no_previous is appended at the END of the optional block: widget/socket order is
+                # permanent (ADR 0002) and a new socket only ever goes last.
+                "no_previous": ("IMAGE", {
+                    "tooltip": "The base to hand back when `subject` is -1 - i.e. this is the "
+                               "first subject in plan order and there is no previous stitched "
+                               "pass to load. Wire the TARGET CLIP here so a single reusable "
+                               "pass chain composites the first face straight onto the clip. "
+                               "Ignored for any other subject."}),
             },
         }
 
@@ -1505,13 +1526,29 @@ class H3PassLoad:
     CATEGORY = CATEGORY
 
 
-    def run(self, plan, subject, stream):
+    def run(self, plan, subject, stream, no_previous=None):
         import torch
 
         plan = checked_plan(plan)
         job = job_folder_for_plan(plan, "H3 Pass Load")
         plan_store.check_pairing_inputs(plan_store.read_plan(job), plan, job, PAIRING_ADVICE)
         plan_store.check_manifest_subjects(plan, job)
+
+        # subject == -1 (H3 Subject Select's previous_subject for the FIRST subject in plan
+        # order): there is no previous stitched pass to load, so hand back the target clip from
+        # `no_previous` as this pass's base. That is what lets ONE reusable pass chain cover any
+        # subject: the first pass composites onto the clip, every later pass onto the previous
+        # pass's stitched result.
+        if int(subject) == plan_store.CHAINED_TO_CLIP:
+            if no_previous is None:
+                raise ValueError(
+                    "H3 Pass Load got subject -1 (the first subject, no previous pass) but "
+                    "`no_previous` is unwired. Wire the target clip into `no_previous` so this "
+                    "first pass has a base to composite its refined face onto.")
+            report = ("no previous subject: H3 Pass Load returned the target clip from "
+                      "`no_previous` as base_images (first subject in plan order).")
+            print("[H3PassLoad] " + report)
+            return (no_previous, None, report)
 
         index = checked_subject(plan, subject)
         stage = plan_store.checked_stage(stream)

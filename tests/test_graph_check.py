@@ -211,35 +211,90 @@ def test_pass_load_chains_onto_the_previous_subject():
     assert "PASS_CHAIN_ORDER" not in codes
 
 
+def _node(workflow, node_id):
+    return next(n for n in workflow["nodes"] if n["id"] == node_id)
+
+
+def _unlink(workflow, node, socket_name):
+    """Drop a link off a node's socket so graph_check reads the node's own WIDGET instead."""
+    for inp in node.get("inputs", []):
+        if inp["name"] == socket_name:
+            lid = inp.get("link")
+            inp["link"] = None
+            if lid is not None:
+                workflow["links"] = [l for l in workflow["links"] if l[0] != lid]
+            return
+
+
 def test_pass_load_must_chain_onto_the_previous_subject_in_plan_order():
-    # The shipped template's Pass Load (subject widget on Subject Select #13 = "0") feeds
-    # subject 1's stitch, so it correctly chains subject 0 -> subject 1. Make that Pass
-    # Load load subject 5 instead: the pass no longer builds on the pass before it.
-    workflow = _load("H3_Face_Refine_Multi_Face.json")
-    for node in workflow["nodes"]:
-        if node["type"] == "H3SubjectSelect" and node["id"] == 13:
-            node["widgets_values"][0] = "5"
-    problems = [p for p in gc.check_graph(workflow) if p.code == "PASS_CHAIN_ORDER"]
+    # The single-chain template's H3PassLoad#26 is driven by H3SubjectSelect (subject on 'next'), so
+    # its subject is not a number and the checker leaves it alone. This H3PassLoad chaining rule is
+    # pinned on a minimal graph instead: H3PassLoad feeds subject 1's stitch (base_images), and its
+    # own subject comes from an H3SubjectSelect. Selecting subject 5 (not subject 0) is a pass that
+    # does not build on the pass before it.
+    def graph(select_value):
+        return {
+            "nodes": [
+                {"id": 1, "type": "H3SubjectSelect", "mode": 0, "widgets_values": [select_value],
+                 "outputs": [{"name": "subject_index", "links": [11]}]},
+                {"id": 2, "type": "H3PassLoad", "mode": 0, "widgets_values": [0, "stitched"],
+                 "inputs": [{"name": "subject", "link": 11}, {"name": "plan"}, {"name": "images"}],
+                 "outputs": [{"name": "images", "links": [12]}]},
+                {"id": 3, "type": "H3FaceStitch", "mode": 0,
+                 "inputs": [{"name": "base_images", "link": 12}],
+                 "outputs": [{"name": "images", "links": [13]}]},
+                {"id": 4, "type": "H3PassSave", "mode": 0, "widgets_values": [1, "stitched"],
+                 "inputs": [{"name": "images", "link": 13}, {"name": "plan"}, {"name": "subject"}],
+                 "outputs": [{"name": "images", "links": []}]},
+            ],
+            "links": [
+                [11, 1, 0, 2, 0, "INT"],
+                [12, 2, 0, 3, 0, "IMAGE"],
+                [13, 3, 0, 4, 0, "IMAGE"],
+            ],
+        }
+
+    problems = [p for p in gc.check_graph(graph("5")) if p.code == "PASS_CHAIN_ORDER"]
     assert problems, "a pass that did not chain onto the previous subject was not caught"
+    assert 2 in problems[0].node_ids
+    # subject 0 is the one subject 1 must build on, so the same graph selecting 0 is clean.
+    assert not [p for p in gc.check_graph(graph("0")) if p.code == "PASS_CHAIN_ORDER"]
 
 
-def test_an_explicit_wrong_chained_from_is_caught():
-    # chained_from defaults to CHAINED_TO_CLIP and the shipped template never sets it, so
-    # the fixtures stay green — but when a user sets it explicitly it must name the subject
-    # the pass really composited onto. Subject 1 chained from 5 is wrong; it built on 0.
+def test_a_fixed_subject_pass_save_with_a_wrong_chained_from_is_caught():
+    # The template drives a Pass Save's subject + chained_from from H3SubjectSelect, so their widgets
+    # are ignored. Unlink both sockets on #39 so the checker reads the widgets, pin subject 1, and
+    # declare chained_from=5 - neither the target clip (-1) nor the previous subject (0): a plate this
+    # pass did not build on.
     workflow = _load("H3_Face_Refine_Multi_Face.json")
-    for node in workflow["nodes"]:
-        if node["type"] == "H3PassSave" and node["id"] == 39:  # subject 1, stitched
-            node["widgets_values"] = [1, "stitched", 5]
+    n39 = _node(workflow, 39)
+    _unlink(workflow, n39, "subject")
+    _unlink(workflow, n39, "chained_from")
+    n39["widgets_values"] = [1, "stitched", 5]
+    problems = [p for p in gc.check_graph(workflow) if p.code == "PASS_CHAIN_ORDER"]
+    assert problems and 39 in problems[0].node_ids
+
+
+def test_a_later_subject_chained_from_the_clip_is_caught():
+    # chained_from = -1 (the target clip) is only legitimate for the FIRST subject. A later subject
+    # building on the clip drops every earlier face from the finished clip - the composite hands back
+    # the LAST pass's frames, which carry the earlier subjects only through the chain - so it is
+    # refused, naming the subject.
+    workflow = _load("H3_Face_Refine_Multi_Face.json")
+    n39 = _node(workflow, 39)
+    _unlink(workflow, n39, "subject")
+    _unlink(workflow, n39, "chained_from")
+    n39["widgets_values"] = [1, "stitched", -1]
     problems = [p for p in gc.check_graph(workflow) if p.code == "PASS_CHAIN_ORDER"]
     assert problems and 39 in problems[0].node_ids
 
 
 def test_a_correct_explicit_chained_from_is_accepted():
     workflow = _load("H3_Face_Refine_Multi_Face.json")
-    for node in workflow["nodes"]:
-        if node["type"] == "H3PassSave" and node["id"] == 39:
-            node["widgets_values"] = [1, "stitched", 0]
+    n39 = _node(workflow, 39)
+    _unlink(workflow, n39, "subject")
+    _unlink(workflow, n39, "chained_from")
+    n39["widgets_values"] = [1, "stitched", 0]    # subject 1 onto the previous subject (0): the chain
     problems = [p for p in gc.check_graph(workflow) if p.code == "PASS_CHAIN_ORDER"]
     assert not problems
 
