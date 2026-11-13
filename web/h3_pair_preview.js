@@ -353,7 +353,7 @@ async function waitForPrompt(promptId, d) {
         if (status && status.status_str === "error") {
             const msgs = (entry.messages || [])
                 .map((m) => (Array.isArray(m) && m[1] ? JSON.stringify(m[1]) : "")).filter(Boolean);
-            d.head.textContent = "Re-plan preview - the re-plan failed";
+            d.head.textContent = "Process Plan - the re-plan failed";
             d.body.textContent = msgs.join("\n") || status.summary ||
                 "The plan node reported an error (it may have refused: nothing to plan, or a " +
                 "pairing that seeds from a plate holding no faces).";
@@ -364,7 +364,7 @@ async function waitForPrompt(promptId, d) {
             return true;
         }
         if (Date.now() - t0 > 300000) {
-            d.head.textContent = "Re-plan preview - timed out";
+            d.head.textContent = "Process Plan - timed out";
             d.body.textContent = "The re-plan run did not finish within 5 minutes.";
             d.foot.appendChild(button("Close", "", d.close));
             return false;
@@ -374,20 +374,20 @@ async function waitForPrompt(promptId, d) {
 
 async function replanPreview(node) {
     if (renderRunning()) {
-        const d = dialog("Re-plan preview");
+        const d = dialog("Process Plan");
         showWait(d, node);
         return;
     }
     const wd = w(node, "job_name");
     const scratch = scratchName(wd ? String(wd.value || "") : "");
-    const d = dialog("Re-plan preview - " + scratch);
+    const d = dialog("Process Plan - " + scratch);
     d.msg.textContent = "building a plan-only prompt from the current settings…";
 
     let built;
     try {
         built = await app.graphToPrompt();
     } catch (e) {
-        d.head.textContent = "Re-plan preview - could not read the graph";
+        d.head.textContent = "Process Plan - could not read the graph";
         d.body.textContent = "The front end could not serialize the workflow: " + e;
         d.foot.appendChild(button("Close", "", d.close));
         return;
@@ -396,7 +396,7 @@ async function replanPreview(node) {
     const planId = String(node.id);
     const sub = ancestorSubgraph(prompt, planId);
     if (!sub[planId]) {
-        d.head.textContent = "Re-plan preview - plan node not in the serialized graph";
+        d.head.textContent = "Process Plan - plan node not in the serialized graph";
         d.body.textContent = "The plan node had no serializable inputs to run on.";
         d.foot.appendChild(button("Close", "", d.close));
         return;
@@ -405,18 +405,22 @@ async function replanPreview(node) {
     sub[planId].inputs = sub[planId].inputs || {};
     sub[planId].inputs["job_name"] = scratch;
 
+    // client_id is optional on /prompt; the frontend keeps it on api.clientId (there is no
+    // api.getClientId()). Send it when present, so execution events route back, but never require it.
+    const payload = { prompt: sub };
+    if (api.clientId) payload.client_id = api.clientId;
     let promptId;
     try {
         const r = await api.fetch("/prompt", {
             method: "POST",
-            body: JSON.stringify({ prompt: sub, client_id: api.getClientId() }),
+            body: JSON.stringify(payload),
         });
         if (r.error || (r.node_errors && Object.keys(r.node_errors).length)) {
             throw new Error(JSON.stringify(r.node_errors || r.error));
         }
         promptId = r.prompt_id;
     } catch (e) {
-        d.head.textContent = "Re-plan preview - run rejected";
+        d.head.textContent = "Process Plan - run rejected";
         d.body.textContent = String(e);
         d.foot.appendChild(button("Close", "", d.close));
         return;
@@ -438,14 +442,15 @@ app.registerExtension({
         const created = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = created ? created.apply(this, arguments) : undefined;
+            const replan = this.addWidget("button", "Process Plan", null,
+                                          () => replanPreview(this));
             const btn = this.addWidget("button", "Pairing preview", null,
                                        () => openPanel(this));
-            const replan = this.addWidget("button", "Re-plan preview", null,
-                                          () => replanPreview(this));
             // A button holds no value, so it must not be serialised: a slot in widgets_values
             // would reinterpret every saved widget after it (ADR 0002 - the plan node's widget
-            // order is permanent, and this adds no widget to it).
-            for (const b of [btn, replan]) {
+            // order is permanent, and this adds no widget to it). Process Plan is added first so
+            // it renders above Pairing preview on the node.
+            for (const b of [replan, btn]) {
                 if (b) {
                     b.serialize = false;
                     b.serializeValue = () => undefined;
