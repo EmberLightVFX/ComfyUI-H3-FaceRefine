@@ -1194,7 +1194,7 @@ there is no click-to-exclude, because a panel that re-decided the plan in the br
 second source of truth about who the subjects are, and the plan is the one the passes were already
 cut against.
 
-Next to it is **Re-plan preview**, which is *not* read-only but is **non-destructive**: it runs the
+Above it is **Process Plan**, which is *not* read-only but is **non-destructive**: it runs the
 plan node — with its own detection, pairing, preview and crops — into a throwaway job folder
 (`<job_name>__preview_<stamp>`) and opens the read-only panel on that. So you can change
 `unmatched_faces`, `max_subjects`, `match_frame`, the tolerance and so on and check the new pairing
