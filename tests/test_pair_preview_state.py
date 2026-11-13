@@ -230,6 +230,29 @@ def test_a_whole_still_subject_is_reported_as_the_whole_still(pack, monkeypatch)
     assert "whole" in subject["pairing"]
 
 
+def test_each_face_row_carries_the_widget_token_that_switches_it_off(pack, monkeypatch):
+    """Every face row carries the `excluded_faces` token that toggles it: the clip number for a
+    clip face, `s<number>` for a face seen only in the reference still. That token is exactly what
+    the panel's Ignore/Restore toggle writes to the node's widget, so the node - not the panel -
+    still owns the plan, and a low-confidence face matched twice can be switched off once."""
+    _run(pack, monkeypatch)
+    state = pack.pair_preview_api.preview_state("group shot")
+
+    for row in list(state["subjects"]) + list(state["left_out"]) + list(state["capped_out"]):
+        if row["clip_face"] is not None:
+            assert row["exclude_token"] == str(row["clip_face"])
+        elif row["still_face"] is not None:
+            assert row["exclude_token"] == "s" + str(row["still_face"])
+        else:
+            assert row["exclude_token"] is None
+
+    subject_tokens = [s["exclude_token"] for s in state["subjects"]]
+    assert subject_tokens and all(isinstance(t, str) and t for t in subject_tokens)
+    # A clip-face subject is addressed by its bare clip number - exactly what Ignore writes.
+    clip_subjects = [s for s in state["subjects"] if s["clip_face"] is not None]
+    assert [s["exclude_token"] for s in clip_subjects] == [str(s["clip_face"]) for s in clip_subjects]
+
+
 # ---------------------------------------------------------------- wiring, busy
 
 def test_the_pack_init_wires_the_preview_module_next_to_the_picker():

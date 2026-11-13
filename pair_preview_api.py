@@ -10,9 +10,11 @@ Read-only is the whole design, and it is what keeps this safe:
 
 * nothing here detects, crops, pairs or re-decides anything. The panel cannot disagree with the
   graph, because it is the graph's own output;
-* nothing here writes. There is no route that takes a pairing back in - exclusions stay the
-  typed `excluded_faces` widget on the plan node, and the interactive pair editor is a later
-  ticket;
+* nothing here writes, and there is no route that takes a pairing back in. Exclusions stay the
+  typed `excluded_faces` widget on the plan node: the front end can offer a per-face toggle that
+  sets that one widget - this module only reports, for each face, the widget token that switches
+  it off (`exclude_token`) - but the node re-decides on the next run, so the panel is never a
+  second source of truth. The interactive re-pairing editor is still a later ticket;
 * the images come back as ComfyUI's own ``/view`` URLs into the output folder. No new static
   file serving is invented here.
 
@@ -142,6 +144,20 @@ def _not_ready(state, status: str, message: str) -> dict:
     return state
 
 
+def _exclude_token(face) -> "str | None":
+    """The ``excluded_faces`` token that switches this face off, spelled the way the widget spells
+    it: a bare clip number for a target-clip face, ``s<n>`` for a still-only face, ``None`` for a
+    row with no face at all. The panel's include/ignore toggle writes exactly this token to the
+    node's widget - the sanctioned control - so the node, never the panel, owns the decision."""
+    clip_face = face.get("clip_face")
+    if clip_face is not None:
+        return str(int(clip_face))
+    still_face = face.get("still_face")
+    if still_face is not None:
+        return "s" + str(int(still_face))
+    return None
+
+
 def _subject_row(root, job, subject) -> dict:
     """One subject's row: its number, the two faces that make it, and the subject reference
     file that sits behind it - including whether that file is actually there."""
@@ -165,6 +181,7 @@ def _subject_row(root, job, subject) -> dict:
                      else None),
         "ref_crop": subject.get("ref_crop"),
         "pairing": _pairing_text(subject),
+        "exclude_token": _exclude_token(subject),
         # The pack's own wording for a subject, reused rather than reworded here.
         "label": _M.subject_label(subject),
     }
@@ -181,6 +198,7 @@ def _not_subject_row(face) -> dict:
         "pairing": _pairing_text(face),
         "match_x": face.get("match_x"), "match_y": face.get("match_y"),
         "capped_by": face.get("capped_by"),
+        "exclude_token": _exclude_token(face),
     }
 
 

@@ -1187,12 +1187,16 @@ reference it is conditioned on (`subject_N.png`). A still-only subject has no cl
 frame, so it shows a placeholder in its place. A pairing can be checked beside the node that made
 it instead of by opening the folder in a file browser.
 
-The **Pairing preview** view is **read-only, and deliberately so**: it reads `plan.json`,
-`pairing_preview.png`, `subject_N.png` and `clip_N.png` out of the job folder and decides nothing of
-its own, so it cannot disagree with the graph. Exclusions stay the typed `excluded_faces` widget —
-there is no click-to-exclude, because a panel that re-decided the plan in the browser would be a
-second source of truth about who the subjects are, and the plan is the one the passes were already
-cut against.
+The **Pairing preview** view reads `plan.json`, `pairing_preview.png`, `subject_N.png` and
+`clip_N.png` out of the job folder and decides nothing of its own, so it cannot disagree with the
+graph. Each face row carries an **Ignore this face** / **Include this face again** toggle, and each
+switched-off face carries **Restore**. These write **only** the node's own `excluded_faces` widget —
+the single sanctioned control for switching a face off (the same typed widget, so a low-confidence
+face that got matched twice can be switched off once and refined only once). They set no pairing
+directly and re-plan nothing in the browser: the plan node re-decides on the next **Process Plan**,
+so the panel never becomes a second source of truth, and the passes are always cut against the
+node's decision, not the panel's. A pending toggle is shown in the switched-off list until you
+re-plan, then applied. There is still no click-to-*re-pair* editor — re-pairing is a later ticket.
 
 Above it is **Process Plan**, which is *not* read-only but is **non-destructive**: it runs the
 plan node — with its own detection, pairing, preview and crops — into a throwaway job folder

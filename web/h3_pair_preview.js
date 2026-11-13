@@ -8,11 +8,13 @@ import { api } from "../../scripts/api.js";
 // already decides it and already draws both plates with every face outlined and numbered; this
 // panel reads that decision back out of the job folder over one JSON route and shows it.
 //
-// READ-ONLY, on purpose and by construction: nothing here writes. No widget value is set, no
-// route is posted to, no file is asked for. Exclusions stay the typed `excluded_faces` widget on
-// the plan node - that is a scope line from the spec - and the interactive pair editor is a
-// later ticket. The panel is also its own front end, separate from the face picker's, so the
-// picker's behaviour stays untouched.
+// Nothing here writes to disk and no write-route is posted to: the panel is read off the job
+// folder. The ONE thing it can change is the node's own `excluded_faces` widget, through a
+// per-face include/ignore toggle. That widget is the single sanctioned control for switching a
+// face off, so editing it does not make the panel a second source of truth: a toggle only sets
+// the widget, and the plan node still re-decides everything when you press Process Plan. Nothing
+// is re-planned in this browser. The interactive re-pairing editor is still a later ticket. The
+// panel is its own front end, separate from the face picker's, so the picker stays untouched.
 //
 // It does keep the picker's one rule: while a prompt is running it refuses. The reason here is
 // not GPU contention but that the job folder it reads is the one that render is writing into, so
@@ -61,6 +63,10 @@ function styleOnce() {
         "  border-radius:4px;padding:3px 8px}",
         ".h3pp-chip.warn{color:#f0c674;border-color:#6a5a2a}",
         ".h3pp-chip.off{color:#e08a8a;border-color:#6a3a3a}",
+        ".h3pp-toggle{font:12px sans-serif;color:#eee;background:#3a3a3a;border:1px solid #5a5a5a;",
+        "  border-radius:4px;padding:3px 8px;cursor:pointer}",
+        ".h3pp-chip + .h3pp-toggle{margin-left:4px}",
+        ".h3pp-cell .h3pp-toggle{margin-top:5px;display:block}",
     ].join("\n");
     document.head.appendChild(s);
 }
@@ -183,11 +189,55 @@ function chips(list, cls, text) {
     return wrap;
 }
 
+// The include/ignore toggle. It reads and writes ONLY the node's `excluded_faces` widget - the
+// one sanctioned control - so the panel never re-decides the pairing itself; the node re-decides
+// when the user presses Process Plan (which serialises this widget). Tokens: a bare number is a
+// clip face, an `s`-prefixed one a reference still face, exactly as the widget and preview number them.
+function tokenLabel(t) {
+    return (typeof t === "string" && t[0] === "s")
+        ? "reference still face " + t.slice(1)
+        : "clip face " + t;
+}
+
+function excludedTokens(node) {
+    const wd = w(node, "excluded_faces");
+    if (!wd) return null;
+    const raw = (wd.value === null || wd.value === undefined) ? "" : String(wd.value);
+    return { wd, tokens: raw.split(",").map((t) => t.trim()).filter((t) => t.length) };
+}
+
+function writeExcluded(node, tokens) {
+    const info = excludedTokens(node);
+    if (!info) return "";
+    const seen = new Set();
+    const out = [];
+    for (const t of tokens) {
+        const s = String(t);
+        if (s && !seen.has(s)) { seen.add(s); out.push(s); }
+    }
+    info.wd.value = out.join(",");
+    try { if (node.setDirtyValue) node.setDirtyValue(); } catch (e) {}
+    try { if (node.dirtyWidget) node.dirtyWidget(info.wd); } catch (e) {}
+    try { app.setDirtyCanvas(true, true); } catch (e) {}
+    return info.wd.value;
+}
+
+function applyExclude(node, token, off) {
+    const info = excludedTokens(node);
+    if (!info) return "";
+    let toks = info.tokens.slice();
+    token = String(token);
+    if (off) { if (!toks.includes(token)) toks.push(token); }
+    else { toks = toks.filter((t) => t !== token); }
+    return writeExcluded(node, toks);
+}
+
 function render(d, data, node, name) {
     d.body.innerHTML = "";
     d.foot.innerHTML = "";
     d.foot.appendChild(el("span", "h3pp-msg",
-        "read-only - nothing here writes to the graph or to disk"));
+        "no disk write, no write-route - the toggles edit only the node's excluded_faces widget; " +
+        "press Process Plan to apply them"));
     const refresh = button("Refresh", "", () => { d.close(); openPanel(node, name); });
 
     if (!data.ready) {
@@ -240,7 +290,11 @@ function render(d, data, node, name) {
             "No pairing_preview.png in this job folder - re-run H3 Multi-Face Plan to write it."));
     }
 
-    d.body.appendChild(el("h4", "h3pp-sect", "subjects"));
+    const widgetTokens = ((excludedTokens(node) || {}).tokens) || [];
+    const tokenSet = new Set(widgetTokens);
+
+    d.body.appendChild(el("h4", "h3pp-sect",
+        "subjects (Ignore switches this face off in excluded_faces; Process Plan applies it)"));
     for (const s of (data.subjects || [])) {
         const row = el("div", "h3pp-row");
         const cell = el("div", "h3pp-cell");
@@ -249,18 +303,51 @@ function render(d, data, node, name) {
         if (s.has_reference && !s.ref_exists) {
             cell.appendChild(el("small", null, "reference file not on disk: " + s.ref_file));
         }
+        if (s.exclude_token) {
+            const tok = String(s.exclude_token);
+            const off = tokenSet.has(tok);
+            cell.appendChild(button(off ? "Include this face again" : "Ignore this face",
+                "h3pp-toggle", () => {
+                    const now = applyExclude(node, tok, !off);
+                    render(d, data, node, name);
+                    d.msg.textContent = "excluded_faces on the node is now '" + now +
+                        "' - press Process Plan to apply (this panel still shows the last plan).";
+                }));
+        }
         row.appendChild(cell);
         row.appendChild(cropCell(s));
         d.body.appendChild(row);
     }
 
-    if ((data.excluded_faces || []).length) {
+    // The switched-off list is shown from the UNION of the plan that was made and the widget as it
+    // is now, so a pending Ignore that has not been re-planned yet is still visible (and reversible)
+    // without digging into the widget. A Restore button pulls the token back out of the widget.
+    const offTokens = [];
+    {
+        const seen = new Set();
+        for (const t of (data.excluded_faces || [])) {
+            const s = String(t);
+            if (!seen.has(s)) { seen.add(s); offTokens.push(s); }
+        }
+        for (const t of widgetTokens) {
+            if (!seen.has(t)) { seen.add(t); offTokens.push(t); }
+        }
+    }
+    if (offTokens.length) {
         d.body.appendChild(el("h4", "h3pp-sect",
-            "excluded - switched off, so they keep their original pixels"));
-        d.body.appendChild(chips(data.excluded_faces, "off",
-            (i) => (typeof i === "string" && i[0] === "s"
-                ? "reference still face " + i.slice(1)
-                : "clip face " + i) + " (the excluded_faces widget)"));
+            "switched off in the excluded_faces widget - they keep their original pixels " +
+            "(Process Plan applies the widget to a fresh plan)"));
+        const wrap = el("div", "h3pp-chips");
+        for (const t of offTokens) {
+            wrap.appendChild(el("span", "h3pp-chip off", tokenLabel(t)));
+            wrap.appendChild(button("Restore", "h3pp-toggle", () => {
+                const now = applyExclude(node, t, false);
+                render(d, data, node, name);
+                d.msg.textContent = "excluded_faces on the node is now '" + now +
+                    "' - press Process Plan to apply (this panel still shows the last plan).";
+            }));
+        }
+        d.body.appendChild(wrap);
     }
     if ((data.left_out || []).length) {
         d.body.appendChild(el("h4", "h3pp-sect",
@@ -348,7 +435,7 @@ async function waitForPrompt(promptId, d) {
         await new Promise((res) => setTimeout(res, 500));
         let hist;
         // The frontend's api object has no .fetch() - the whole pack uses global fetch on
-        // api.apiURL(...) (see openPanel and h3_face_select.js). A 404 while the job is still
+        // api.apiURL(...) (as openPanel and the face picker already do). A 404 while the job is still
         // queued is normal, so fall back to null rather than throwing.
         try {
             const hr = await fetch(api.apiURL("/history/" + encodeURIComponent(promptId)));
