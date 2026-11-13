@@ -172,6 +172,11 @@ def test_the_plan_and_the_subject_references_land_in_the_job_folder(pack, monkey
     # contiguous, which is what the passes, the manifest and the composite all count on.
     assert not (job / "subject_2.png").exists()
     assert [s["ref_file"] for s in plan["subjects"]] == ["subject_0.png", "subject_1.png"]
+    # The clip face beside it (#9): a subject with a clip face on the match frame gets a clip
+    # crop recorded in the plan and written out, so the panel can show both faces at once.
+    assert (job / "clip_0.png").is_file()
+    assert (job / "clip_1.png").is_file()
+    assert [s["clip_file"] for s in plan["subjects"]] == ["clip_0.png", "clip_1.png"]
 
     with open(job / "plan.json", encoding="utf-8") as fh:
         written = json.load(fh)

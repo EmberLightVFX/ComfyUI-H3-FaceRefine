@@ -75,12 +75,16 @@ def _output_root() -> str:
 def _view_url(root: str, path: str) -> str:
     """A ``/view`` URL for a file under ComfyUI's output folder.
 
-    ComfyUI serves that folder itself; a job folder sits one level inside it, so the file name
-    ``/view`` wants is the path relative to the output root, with forward slashes.
+    ComfyUI serves that folder itself; a job folder sits one level inside it. ``/view`` wants the
+    folder and the bare file name as SEPARATE query params - a subpath crammed inside ``filename``
+    404s - so split at the last forward slash and quote each half. That also lets a job-name folder
+    which itself contains a space resolve, since the space survives as ``%20`` in ``subfolder``.
     """
     rel = os.path.relpath(str(path), str(root))
     rel = rel.replace(os.sep, "/").replace("\\", "/")
-    return "/view?type=output&filename=" + urllib.parse.quote(rel)
+    head, _, base = rel.rpartition("/")
+    return ("/view?type=output&subfolder=" + urllib.parse.quote(head)
+            + "&filename=" + urllib.parse.quote(base))
 
 
 def _face_number(value):
@@ -152,6 +156,13 @@ def _subject_row(root, job, subject) -> dict:
         "ref_file": ref_file,
         "ref_exists": exists,
         "ref_url": _view_url(root, os.path.join(job, str(ref_file))) if exists else None,
+        "clip_file": subject.get("clip_file"),
+        "clip_exists": bool(subject.get("clip_file")) and
+                       os.path.isfile(os.path.join(job, str(subject.get("clip_file")))),
+        "clip_url": (_view_url(root, os.path.join(job, str(subject["clip_file"])))
+                     if (subject.get("clip_file") and
+                         os.path.isfile(os.path.join(job, str(subject["clip_file"]))))
+                     else None),
         "ref_crop": subject.get("ref_crop"),
         "pairing": _pairing_text(subject),
         # The pack's own wording for a subject, reused rather than reworded here.
