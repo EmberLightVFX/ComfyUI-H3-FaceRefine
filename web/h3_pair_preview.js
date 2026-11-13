@@ -62,11 +62,13 @@ function styleOnce() {
         ".h3pp-chip{font:12px sans-serif;color:#ccc;background:#2b2b2b;border:1px solid #4a4a4a;",
         "  border-radius:4px;padding:3px 8px}",
         ".h3pp-chip.warn{color:#f0c674;border-color:#6a5a2a}",
-        ".h3pp-chip.off{color:#e08a8a;border-color:#6a3a3a}",
+        ".h3pp-chip.off{color:#e08a8a;border-color:#6a3a3a;background:rgba(224,138,138,.16)}",
         ".h3pp-toggle{font:12px sans-serif;color:#eee;background:#3a3a3a;border:1px solid #5a5a5a;",
         "  border-radius:4px;padding:3px 8px;cursor:pointer}",
         ".h3pp-chip + .h3pp-toggle{margin-left:4px}",
         ".h3pp-cell .h3pp-toggle{margin-top:5px;display:block}",
+        ".h3pp-row.off{background:rgba(224,138,138,.14);border-color:#7a4040}",
+        ".h3pp-row.off b{color:#e6b3b3}",
     ].join("\n");
     document.head.appendChild(s);
 }
@@ -306,6 +308,7 @@ function render(d, data, node, name) {
         if (s.exclude_token) {
             const tok = String(s.exclude_token);
             const off = tokenSet.has(tok);
+            if (off) row.classList.add("off");
             cell.appendChild(button(off ? "Include this face again" : "Ignore this face",
                 "h3pp-toggle", () => {
                     const now = applyExclude(node, tok, !off);
