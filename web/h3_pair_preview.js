@@ -87,6 +87,9 @@ function styleOnce() {
         ".h3pp-thumb.clickable:hover .h3pp-crop{border-color:#e0c060}",
         ".h3pp-thumb.clickable:hover .h3pp-nocrop{border-color:#e0c060}",
         ".h3pp-hint{font:11px sans-serif;color:#7aa0c8;margin-top:2px;text-align:center}",
+        ".h3pp-reused{color:#8fb4d8}",
+        ".h3pp-warn{color:#e0c060;font-weight:600}",
+        ".h3pp-sub{font:12px sans-serif;color:#e0c060;margin:2px 0 0 14px}",
     ].join("\n");
     document.head.appendChild(s);
 }
@@ -362,6 +365,22 @@ function render(d, data, node, name) {
 
     d.head.textContent = "Pairing preview - " + data.job_name + ": " + data.subject_count
         + " subject(s), match frame " + data.match_frame;
+    if (data.reused) {
+        const banner = el("p", "h3pp-note h3pp-reused",
+            "This job's plan was REUSED on the last H3 Multi-Face Plan run - the node only plans "
+            "when there is no saved plan yet, or after Process Plan clears this folder, so running "
+            "the flow again never re-cuts or overwrites it.");
+        d.body.appendChild(banner);
+        const pending = data.unapplied || [];
+        if (pending.length) {
+            d.body.appendChild(el("p", "h3pp-note h3pp-warn",
+                "Your node settings differ from the saved plan, so they were NOT applied to that "
+                "run (it reused the saved subject set to keep the existing passes valid). Press "
+                "Process Plan to apply them (the passes must then be re-run), or use a new "
+                "job_name. What differs:"));
+            for (const line of pending) d.body.appendChild(el("p", "h3pp-sub h3pp-warn", line));
+        }
+    }
 
     const inputs = data.inputs || {};
     const box = el("div", "h3pp-inputs");

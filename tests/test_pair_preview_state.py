@@ -279,6 +279,19 @@ def test_the_state_offers_every_face_for_repairing_and_names_the_overrides_in_fo
     assert gained["partner_still"] == 0 and gained["partner_token"] == "s0"
 
 
+def test_the_state_surfaces_the_last_runs_reuse_and_what_it_did_not_apply(pack, monkeypatch):
+    """A fresh plan run is not a reuse; after the node reuses a saved plan the panel says so and
+    lists the settings that reuse did NOT apply, so the user knows to press Process Plan."""
+    _run(pack, monkeypatch, job_name="group shot")
+    state = pack.pair_preview_api.preview_state("group shot")
+    assert state["reused"] is False and state["unapplied"] == []
+
+    ps.mark_resumed(state["job_dir"], ["excluded_faces: the node now has [3], the saved plan used []"])
+    reused = pack.pair_preview_api.preview_state("group shot")
+    assert reused["reused"] is True
+    assert any("excluded_faces" in line for line in reused["unapplied"])
+
+
 # ---------------------------------------------------------------- wiring, busy
 
 def test_the_pack_init_wires_the_preview_module_next_to_the_picker():

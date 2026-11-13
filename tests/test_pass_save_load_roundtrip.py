@@ -174,17 +174,18 @@ def test_pass_save_refuses_a_plan_whose_pairing_inputs_differ_from_the_job(pack,
     assert "match_frame" in str(exc.value)
 
 
-def test_the_plan_node_refuses_to_overwrite_a_job_planned_from_other_inputs(pack, monkeypatch,
-                                                                           tmp_path):
-    """Same job_name, different widgets: the passes already in the folder were cut from the
-    old pairing, so re-planning there would mix two pairings into one clip."""
-    _run(pack, monkeypatch)
-    with pytest.raises(ValueError) as exc:
-        _run(pack, monkeypatch, source="target_clip")
-    message = str(exc.value)
-    assert "subject_source" in message
-    assert "job_name" in message
-    assert str(_job(tmp_path)) in message
+def test_the_plan_node_reuses_a_job_planned_from_other_inputs_rather_than_mixing(pack, monkeypatch,
+                                                                                tmp_path):
+    """Same job_name, different widgets: rather than re-plan over the passes already cut from the
+    old pairing (which would mix two pairings into one clip), the plan node reuses the saved plan
+    and warns that the changed input was not applied."""
+    first, _, _, _ = _run(pack, monkeypatch)
+    plan, _, report, _ = _run(pack, monkeypatch, source="target_clip")
+
+    assert plan["inputs"]["subject_source"] == "union"           # the saved plan, not this run's
+    assert "reused the saved plan" in report
+    assert "NOTICE" in report
+    assert "subject_source" in report and "job_name" in report
 
 
 def test_the_plan_node_re_plans_the_same_pairing_and_the_saved_pass_survives(pack, monkeypatch,

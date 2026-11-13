@@ -1040,7 +1040,7 @@ subject, so it has to be visible at the node that made it.
 | `match_tolerance` | `0.05` | How far apart the two detections of one face may sit and still pair, as a **fraction of the clip's diagonal** so it means the same at any resolution (0.05 of a 1000×1000 clip is 71 px). The boxes must also overlap. Raise it if the still is framed tighter than the clip; lower it in a crowd. |
 | `excluded_faces` | empty | Face numbers to switch off, comma-separated, exactly as numbered on the `preview`: `0, 3`. A bare number is a **target clip** face; `s2` is a **reference still** face — the only way to switch off a bystander the photo saw and the clip never did. An **excluded face** never becomes a subject and keeps its original pixels, and the face paired to it falls to `unmatched_faces`. A text widget, so the answer survives a reload with no front end. |
 | `max_subjects` | `0` | `0` = no cap. A cap is a **loud** truncation: it applies after the faces are ordered and after `unmatched_faces` has had its say, every dropped face is named in the report with its position at the match frame, and the number the cap saves is printed beside the number it spends. It also joins the **pairing fingerprint**, because a cap changes who the subjects are. |
-| `job_name` | empty | The **job folder** under ComfyUI's output folder. Left blank it is named after the clip. **Keep the same name to resume a job** — change it, or change any input the fingerprint tracks, and the nodes refuse rather than mixing two pairings into one clip. |
+| `job_name` | empty | The **job folder** under ComfyUI's output folder. Left blank it is named after the clip. **Keep the same name to resume a job** — change it, or change an input the fingerprint tracks, and the pass nodes **refuse** rather than mixing two pairings into one clip, while **H3 Multi-Face Plan** *reuses* the saved plan and warns that the change was not applied (press **Process Plan** to apply it). |
 | `unmatched_faces` | `leave` | What becomes of an **unpaired face** — a face on one plate with no partner on the other. It decides the **subject set**, so it lives here rather than on the pass nodes, and it is recorded in `plan.json`. See [`unmatched_faces`](#unmatched_faces-three-answers). |
 | `crop_factor` | `2.5` | The crop factor **H3 Face Track + Crop** will use for this job. Set it to that node's `crop_factor`, and to nothing else: each **subject reference** is cut with the rectangle that factor gives — crop_factor × face height, centred on the face, mapped into the **reference still** at its native resolution. A number that differs from the tracker's mis-frames every reference in the job, so it is recorded in `plan.json` (the overlap warnings, the pairing preview and a resumed job all read it back from there) and it joins the **pairing fingerprint**. |
 | `pair_overrides` | empty | Manual pairings, for when the automatic pairing matched the **wrong** two faces. Set by clicking a face image in the pairing panel, or by hand: comma-separated `face=partner`, where a face is a bare **target clip** number or an `s`-prefixed **reference still** number, and the partner is another face on the other plate or `none` — e.g. `0=s2` (clip face 0's reference is still face 2), `s1=0` the same fact from the other side, `2=none` to switch a face's partner off. A manual pairing over-rides the positional guess, and the plan node re-pairs the whole job when **Process Plan** runs, so its passes must be re-run. Recorded in `plan.json` and part of the **pairing fingerprint**. |
@@ -1184,11 +1184,20 @@ deliberately with the SAME inputs to resume this job. If the inputs really are m
 rename or delete the job folder first: every pass already inside it was cut from the inputs above.
 ```
 
-Re-planning the *same* inputs into the *same* `job_name` is a resume, and is allowed — that is how
-a job gets come back to. A subject-set change reports itself as a set difference rather than two
-numbers: `subject set: in the job folder: subject 1 (clip face 2, still face 1) | in this plan: …`.
-The pass nodes add a second gate that refuses a manifest recording a subject this plan does not
-have, which is what catches a folder left over from a plan you have since changed.
+A re-run into an existing job is now the ordinary case, not an error: **H3 Multi-Face Plan only
+decides a pairing when there is no saved plan yet** — a first run, or after the pairing panel's
+**Process Plan** clears the folder. Run the flow again and the plan node **reuses** the saved
+`plan.json`: it neither re-cuts nor overwrites, so re-running is never destructive and cannot mix
+two pairings. If the node's widgets differ from the saved plan, that change is *not* applied to the
+reused run — applying it would orphan the passes already in the folder — so the report says so and
+names what differs, and the pairing panel shows the same note, pointing at **Process Plan**. A
+subject-set change is named as a set difference in that warning:
+`subject set: the saved plan has N subject(s), these settings would make M`.
+
+The **pass nodes** keep a hard gate the plan node does not: they refuse a plan whose fingerprint
+differs from the `plan.json` already in the folder, and refuse a manifest recording a subject this
+plan does not have — which is what catches a folder left over from a plan you have since changed.
+The example above (`pairing_preview`'s error box) is that pass-node refusal.
 
 ### The pairing preview panel
 
@@ -1216,15 +1225,15 @@ marked — plus a **no partner** choice. Picking writes **only** the node's `pai
 whole job on the next **Process Plan**, so the panel still decides nothing of its own and that job's
 passes have to be re-run.
 
-Above it is **Process Plan**, which is *not* read-only: it re-runs the plan node into this node's
-`job_name` and **replaces** that job's plan. To get past the pairing-fingerprint guard (which
-refuses to keep two pairings in one folder), the panel first clears the plan node's OWN stale
-artifacts — the previous `plan.json` is kept as `plan_prev.json`, and the preview and the
-subject/clip crops are removed — then the node detects, pairs and writes fresh into the same name.
-It authors no pairing itself, and it never touches pass stages (`manifest.json`, `passes/`): if
-those belonged to the previous pairing, the Pass/Composite nodes' own guards refuse them, so
-replacing a plan means its passes have to be re-run. Use it to commit an Ignore toggle, or a
-changed pairing, to the job you are about to queue.
+Above it is **Process Plan**, which is *not* read-only: it **replaces** this node's `job_name` plan.
+Because the plan node now *reuses* any saved plan rather than re-planning, Process Plan first clears
+the plan node's OWN stale artifacts — the previous `plan.json` is kept as `plan_prev.json`, and the
+preview and the subject/clip crops are removed — so the node re-runs with nothing to reuse and
+detects, pairs and writes fresh into the same name. That is the one way to change an existing job's
+pairing. It authors no pairing itself, and it never touches pass stages (`manifest.json`,
+`passes/`): if those belonged to the previous pairing, the Pass/Composite nodes' own guards refuse
+them, so replacing a plan means its passes have to be re-run. Use it to commit an Ignore toggle, a
+re-pair, or any changed input to the job you are about to queue.
 
 It **refuses to open or refresh while a render is running**, with no override, and the front end
 and the route enforce that independently:
