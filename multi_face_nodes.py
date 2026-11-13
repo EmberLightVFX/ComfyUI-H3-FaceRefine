@@ -473,7 +473,7 @@ class H3MultiFacePlan:
                     "default": "", "multiline": False,
                     "tooltip": "Manual pairings, for when the automatic pairing matched the WRONG "
                                "two faces (close faces in a crowd, a detector that mixed up two "
-                               "people). Set this from the Pairing preview panel's Re-pair grid, "
+                               "people). Click a face image in the Pairing preview panel to set "
                                "or write it by hand: comma-separated, each entry face=partner.\n\n"
                                "A face is a bare number for the TARGET CLIP or s2 for a REFERENCE "
                                "STILL face - the same numbers as excluded_faces and the preview. "
