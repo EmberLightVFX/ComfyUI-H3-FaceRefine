@@ -412,7 +412,7 @@ the stitch can put each refined face back exactly where it belongs.
 ### Multi Face — the plan picks the subjects
 
 `H3_Face_Refine_Multi_Face.json` is the Manual Select front end plus the plan, wired as **one
-reusable pass chain** that covers any number of subjects: **H3 Subject Select** on `next` walks the
+reusable pass chain** that covers any number of subjects: **H3 Subject Select** in Increment mode walks the
 plan, and **H3 Pass Load** chains each pass onto the previous subject's stitched result (its
 `no_previous` clip carries the first subject). You queue it once per subject rather than copying a
 branch per person.
@@ -1264,7 +1264,7 @@ Detection therefore stays exactly once in your graph — the loader did it, this
 the tracker that follows runs no detection pass at all.
 
 One branch of the graph per **pass**. Queue it once per subject, changing only the `subject` widget —
-or leave that on `next` and let the **pass manifest** move the cursor for you.
+or leave it and set **mode** to Increment Value - the default - and let the **pass manifest** walk the cursor forward for you, so each queue takes the next subject.
 
 **Inputs**
 
@@ -1272,7 +1272,8 @@ or leave that on `next` and let the **pass manifest** move the cursor for you.
 |---|---|---|
 | `plan` | - | The subject plan from **H3 Multi-Face Plan**: who the subjects are, which face in the clip each one is, which face in the still became their subject reference, and whether they were paired at all. It records the match frame's boxes only, so it cannot name this subject in the other shots on its own — that is what `face_pick` is for. |
 | `face_pick` | - | The clip's own pick payload, from the same **H3 Load Video + Face Select** the images come from: every frame's boxes, confidences and shot boundaries. Its picks are replaced with this subject's; the boxes pass through untouched. **Do not resize, crop or trim between the loader and this node** — every box would land in the wrong place. |
-| `subject` | `next` | Which subject this pass refines. `next` is the first subject in plan order with no completed pass recorded in the job folder — the resume cursor, so a job interrupted between subjects starts again on the right one. A number takes that subject by the number the plan prints in its report and on the pairing preview, which is how you re-run one subject on purpose. The dropdown cannot list the plan's own names, because ComfyUI asks for the options before anything is wired; the report names everyone in the plan, and an answer that is not one of them lists them. |
+| `subject` | `0` | Which subject this pass refines, as a NUMBER. With the default mode (Increment Value) this is the subject you are on NOW: the walk position lives in the job folder, so queueing the same graph again advances through the plan with nothing to edit, and the report always shows this ID and where the next queue lands. Put a number here to JUMP straight to that subject - to start the walk somewhere specific, or to re-run one person. A number the plan does not hold is refused and names the ones it does. |
+| `mode` | `Increment Value` | What happens to the subject value after each queue, and the report shows where it lands: **Increment Value** (default) goes to the next subject (+1), so queueing once per subject walks the whole plan top to bottom - the old `next`, made visible as a number; **Decrement Value** steps back to the previous subject (-1), e.g. to redo an earlier person; **Fixed Value** holds this subject and runs it again each queue (re-render one subject without moving). |
 
 **Outputs**
 

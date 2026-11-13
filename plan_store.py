@@ -1486,6 +1486,48 @@ def next_subject(plan, job_dir):
         if int(subject["index"]) not in done:
             return subject
     return None
+
+
+# ---- the subject-selection cursor -------------------------------------------
+# H3 Subject Select walks the plan one subject per queue. Which subject the walk is
+# sitting on is remembered HERE, in the job folder (the pipeline's memory), so queueing
+# the same graph again advances to the next subject without editing the graph, and the
+# walk direction (Fixed / Increment / Decrement) decides where the value lands after
+# each run. `seed` is the subject value the widget carried when the cursor was last
+# written: if it is unchanged, the walk continues from `cursor`; if the user changed
+# the value, that is an explicit jump and the walk restarts from it.
+SUBJECT_CURSOR_FILENAME = "subject_cursor.json"
+
+
+def subject_cursor_path(job_dir) -> str:
+    return os.path.join(str(job_dir), SUBJECT_CURSOR_FILENAME)
+
+
+def read_subject_cursor(job_dir):
+    """The saved {"cursor", "seed"} pair, or None when this job has no walk yet."""
+    path = subject_cursor_path(job_dir)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or "cursor" not in data or "seed" not in data:
+        return None
+    try:
+        return {"cursor": int(data["cursor"]), "seed": int(data["seed"])}
+    except (TypeError, ValueError):
+        return None
+
+
+def write_subject_cursor(job_dir, cursor, seed) -> None:
+    """Remember where the subject walk stands and what the widget was seeded with."""
+    os.makedirs(str(job_dir), exist_ok=True)
+    with open(subject_cursor_path(job_dir), "w", encoding="utf-8") as fh:
+        json.dump({"cursor": int(cursor), "seed": int(seed)}, fh)
+
+
 # ----------------------------------------------------------------------------
 # the pass manifest: the WRITE side, and the pass layout inside the job folder
 # ----------------------------------------------------------------------------

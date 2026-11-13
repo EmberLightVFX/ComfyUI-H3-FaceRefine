@@ -1006,7 +1006,8 @@
       ],
       "properties": {},
       "widgets_values": [
-        "next"
+        0,
+        "Increment Value"
       ],
       "title": "Subject Select - pass B - subject 1"
     },
