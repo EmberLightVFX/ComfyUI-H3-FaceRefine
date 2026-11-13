@@ -57,7 +57,7 @@ SUBJECT_SOURCES = ("target_clip", "reference_still", "union")
 # whole downstream chain is gated on: the composite needs a stitched pass for every subject in
 # the plan, and the pairing fingerprint compares the subject set to keep two pairings out of one
 # job folder. Deciding it once here means "who is a subject" is answered in `plan.json`.
-UNMATCHED_FACES = ("leave", "no_reference", "with_still")
+UNMATCHED_FACES = ("leave", "no_reference", "with_still", "clip_region")
 DEFAULT_UNMATCHED_FACES = "leave"
 
 # What kind of subject reference a subject has, so no pass has to infer it from whether
@@ -627,8 +627,12 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
     * ``no_reference`` - it becomes a subject with no subject reference, and its pass runs with
       nothing wired into H3's reference slots.
     * ``with_still`` - it becomes a subject whose subject reference is the whole reference still.
+    * ``clip_region`` - it becomes a subject whose subject reference is cut from the reference
+      still at the same clip-aligned rectangle a paired subject would get - the region where that
+      clip face sits. Right where the still shares the clip's framing; on a differently framed
+      still it crops the wrong region, where ``with_still`` is the safer-but-vaguer choice.
 
-    A face that found a partner is identical in all three modes.
+    A face that found a partner is identical in every mode.
 
     `crop_factor` is **H3 Face Track + Crop's own crop factor**, which that node takes from a
     widget. Every **subject reference** is cut with the rectangle that factor gives at the match
@@ -647,7 +651,9 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
             f"unmatched_faces must be one of {' | '.join(UNMATCHED_FACES)}, got "
             f"{unmatched_faces!r}. leave does not make a subject of a face that found no "
             f"partner, so it keeps its original pixels; no_reference makes one with no subject "
-            f"reference; with_still makes one conditioned on the whole reference still."
+            f"reference; with_still makes one conditioned on the whole reference still; "
+            f"clip_region makes one whose reference is cut from the still at the clip face's own "
+            f"region."
         )
     frame = int(match_frame)
     if frame < 0:
@@ -744,6 +750,17 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
             subject["has_reference"] = True
             subject["ref_kind"] = REF_STILL
             subject["ref_crop"] = [0, 0, int(sw), int(sh)]
+        elif unmatched_faces == "clip_region":
+            # Still cut the reference out of the still, but at the region where THIS clip face
+            # sits: the same rectangle the tracker would crop it with (crop_rect_for_reference
+            # maps it into the still's pixels), i.e. exactly the crop a paired subject gets. It is
+            # the right region only where the still shares the clip's framing; the report says so,
+            # and `with_still` is the alternative when it does not.
+            if clip_face is not None:
+                subject["has_reference"] = True
+                subject["ref_kind"] = REF_CROP
+                subject["ref_crop"] = crop_rect_for_reference(
+                    tracker_rect(clip[clip_face], (tw, th), factor), (sw, sh), (tw, th))
         subjects.append(subject)
 
     # `leave` takes the unpaired faces out of the subject set altogether, and records them
@@ -838,29 +855,37 @@ def build_subject_plan(target_boxes, target_confs, still_boxes, still_confs,
 KIND_PAIRED = "paired"
 KIND_NO_REFERENCE = "unpaired_no_reference"
 KIND_WHOLE_STILL = "unpaired_whole_still"
+KIND_CLIP_REGION = "unpaired_clip_region"
 KIND_LEFT_OUT = "left_out"
 
 
 def subject_kind(subject) -> str:
     """Which kind of subject this entry is, in one word.
 
-    ``paired`` has a subject reference of its own - a crop of the face the still resolved at the
-    same place as the clip's; ``unpaired_no_reference`` is a subject with nothing in H3's
-    reference slots; ``unpaired_whole_still`` is a subject conditioned on the whole reference
-    still. The fourth kind, ``left_out``, never reaches a pass at all, so it is counted from
-    ``plan["left_out"]`` rather than from a subject entry.
+    ``paired`` has a subject reference cut from a still face that resolved to this clip face (or a
+    still-only subject, whose only face is the still's); ``unpaired_clip_region`` is an unpaired
+    clip face whose reference was cut from the still at the clip face's own region, with no still
+    face resolved; ``unpaired_no_reference`` is a subject with nothing in H3's reference slots;
+    ``unpaired_whole_still`` is a subject conditioned on the whole reference still. The last kind,
+    ``left_out``, never reaches a pass at all, so it is counted from ``plan["left_out"]`` rather
+    than from a subject entry.
     """
     entry = subject or {}
     if entry.get("ref_kind") == REF_STILL:
         return KIND_WHOLE_STILL
     if entry.get("has_reference"):
-        return KIND_PAIRED
+        # A crop reference resolved a still face (paired, or still-only) - unless this is the
+        # clip_region case, which cut the still at the clip face's region with no still face.
+        if entry.get("still_face") is not None:
+            return KIND_PAIRED
+        return KIND_CLIP_REGION
     return KIND_NO_REFERENCE
 
 
 def subject_kind_counts(plan) -> dict:
     """How many subjects of each kind this plan holds, plus how many faces were left out."""
-    counts = {KIND_PAIRED: 0, KIND_NO_REFERENCE: 0, KIND_WHOLE_STILL: 0, KIND_LEFT_OUT: 0}
+    counts = {KIND_PAIRED: 0, KIND_NO_REFERENCE: 0, KIND_WHOLE_STILL: 0,
+              KIND_CLIP_REGION: 0, KIND_LEFT_OUT: 0}
     for subject in (plan or {}).get("subjects") or []:
         counts[subject_kind(subject)] += 1
     counts[KIND_LEFT_OUT] = len((plan or {}).get("left_out") or [])
@@ -918,6 +943,18 @@ def unmatched_lines(plan) -> list:
                 f"unmatched_faces=with_still, so the conditioning is whole-frame and H3 chooses "
                 f"which face in the still it applies to - not a guarantee the right face is "
                 f"used.")
+    elif mode == "clip_region":
+        for subject in (plan or {}).get("subjects") or []:
+            if subject_kind(subject) != KIND_CLIP_REGION:
+                continue
+            crop = subject.get("ref_crop") or [0, 0, 0, 0]
+            lines.append(
+                f"{_face_position(subject, frame)} is subject {subject['index']} with its subject "
+                f"reference cut from the reference still at the region this clip face sits in "
+                f"({int(crop[2])}x{int(crop[3])}px): unmatched_faces=clip_region, which is the "
+                f"right region only where the still shares the clip's framing - if the still is a "
+                f"different composition this crops the wrong area, and with_still is the safer "
+                f"choice there.")
     return lines
 
 

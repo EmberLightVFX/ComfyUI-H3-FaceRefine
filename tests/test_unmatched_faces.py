@@ -49,7 +49,7 @@ def _only_unpaired(plan) -> dict:
 
 def test_the_mode_vocabulary_lives_in_the_plan_module():
     """One place decides the words, so the node's combo and the plan cannot drift apart."""
-    assert ps.UNMATCHED_FACES == ("leave", "no_reference", "with_still")
+    assert ps.UNMATCHED_FACES == ("leave", "no_reference", "with_still", "clip_region")
     assert ps.DEFAULT_UNMATCHED_FACES == "leave"
     assert ps.REF_KINDS == ("crop", "still", "none")
 
@@ -187,22 +187,66 @@ def test_a_paired_subject_is_identical_in_all_three_modes():
     rows = [[{k: v for k, v in subject.items() if k != "index"}
              for subject in plan["subjects"] if subject["paired"]] for plan in plans]
 
-    assert rows[0] == rows[1] == rows[2]
+    assert all(row == rows[0] for row in rows)
     for plan in plans:
         paired = [s for s in plan["subjects"] if s["paired"]]
         assert [s["ref_kind"] for s in paired] == ["crop"] * len(paired)
         assert [s["clip_face"] for s in paired] == [0, 2]
 
 
+# --- clip_region: the reference is cut from the still at the clip face's own region ----------
+
+def test_clip_region_makes_a_subject_and_cuts_its_reference_from_the_still():
+    """The unpaired clip face becomes a subject whose reference is a CROP of the still - not the
+    whole still and not nothing. No still face is resolved; the region is the clip face's, mapped in."""
+    plan = _plan(mode="clip_region")
+    row = _only_unpaired(plan)                       # clip face 1, the one with no partner
+
+    assert row["has_reference"] is True
+    assert row["ref_kind"] == "crop"
+    assert row["still_face"] is None
+    assert row["ref_crop"] is not None
+    assert row["ref_crop"][2] > 0 and row["ref_crop"][3] > 0
+    assert ps.subject_kind(row) == ps.KIND_CLIP_REGION
+
+
+def test_clip_region_cuts_the_reference_at_the_clip_face_rect_like_a_paired_crop():
+    """The clip_region rectangle is exactly the one `paired` computes for a clip face: that clip
+    face's tracker rect mapped into the still. Clip face 1 (left out by `leave`) is cut by that
+    same formula here."""
+    row = _only_unpaired(_plan(mode="clip_region"))
+    expected = ps.crop_rect_for_reference(
+        ps.tracker_rect(CLIP_BOXES[1], (1000, 1000), ps.DEFAULT_CROP_FACTOR),
+        (2000, 2000), (1000, 1000))
+    assert [round(v, 3) for v in row["ref_crop"]] == [round(v, 3) for v in expected]
+
+
+def test_clip_region_report_names_the_subject_and_the_framing_caveat():
+    lines = ps.unmatched_lines(_plan(mode="clip_region"))
+    assert len(lines) == 1
+    text = lines[0]
+    assert "clip face 1" in text
+    assert "unmatched_faces=clip_region" in text
+    assert "region this clip face sits in" in text
+    assert "shares the clip's framing" in text
+    assert "with_still is the safer" in text
+
+
 # --- the counts a report reads off ----------------------------------------------------------
 
 def test_the_plan_counts_its_subjects_by_kind():
     assert ps.subject_kind_counts(_plan()) == {
-        "paired": 2, "unpaired_no_reference": 0, "unpaired_whole_still": 0, "left_out": 1}
+        "paired": 2, "unpaired_no_reference": 0, "unpaired_whole_still": 0,
+        "unpaired_clip_region": 0, "left_out": 1}
     assert ps.subject_kind_counts(_plan(mode="no_reference")) == {
-        "paired": 2, "unpaired_no_reference": 1, "unpaired_whole_still": 0, "left_out": 0}
+        "paired": 2, "unpaired_no_reference": 1, "unpaired_whole_still": 0,
+        "unpaired_clip_region": 0, "left_out": 0}
     assert ps.subject_kind_counts(_plan(mode="with_still")) == {
-        "paired": 2, "unpaired_no_reference": 0, "unpaired_whole_still": 1, "left_out": 0}
+        "paired": 2, "unpaired_no_reference": 0, "unpaired_whole_still": 1,
+        "unpaired_clip_region": 0, "left_out": 0}
+    assert ps.subject_kind_counts(_plan(mode="clip_region")) == {
+        "paired": 2, "unpaired_no_reference": 0, "unpaired_whole_still": 0,
+        "unpaired_clip_region": 1, "left_out": 0}
 
 
 def test_every_subject_is_counted_exactly_once():
