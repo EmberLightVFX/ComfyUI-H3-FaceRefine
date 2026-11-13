@@ -274,6 +274,22 @@ def test_the_reference_crop_refuses_a_differently_framed_still():
     assert "aspect" in str(exc.value)
 
 
+def test_a_small_reference_crop_is_widened_to_h3s_floor():
+    """A small face would otherwise cut a reference too small for H3 to encode (its VAE /16 +
+    7-wide patch conv need a latent of at least 7). The crop window is widened to the floor -
+    drawn from the still's real pixels - and kept inside the still."""
+    # A 40px clip crop against a 2x still is an 80px cut - under the 128px floor.
+    x, y, w, h = ps.crop_rect_for_reference([480.0, 480.0, 40.0, 40.0], (2000, 2000), (1000, 1000))
+    assert w >= ps.MIN_H3_REF_EDGE and h >= ps.MIN_H3_REF_EDGE
+    assert x >= 0 and y >= 0 and x + w <= 2000 and y + h <= 2000
+
+
+def test_a_reference_crop_already_at_the_floor_is_left_alone():
+    """The floor only acts below it: a healthy crop is not stretched or re-centred."""
+    assert ps.crop_rect_for_reference([325.0, 325.0, 250.0, 250.0],
+                                      (2000, 2000), (1000, 1000)) == [650, 650, 500, 500]
+
+
 
 # --- the subject plan --------------------------------------------------------------
 

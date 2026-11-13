@@ -251,7 +251,7 @@ def _job_with_references(tmp_path, monkeypatch, plan, payload, files):
         if name:
             # Distinctive per subject, so a crop of the wrong one cannot pass for the right one.
             tone = 40 + 60 * int(subject["index"])
-            arr = np.zeros((64, 96, 3), np.uint8)
+            arr = np.zeros((128, 192, 3), np.uint8)
             arr[..., 0], arr[..., 1], arr[..., 2] = tone, 200 - tone, 128
             Image.fromarray(arr).save(os.path.join(str(job), name))
             subject["ref_file"] = name
@@ -268,7 +268,7 @@ def _job_with_references(tmp_path, monkeypatch, plan, payload, files):
         if name:
             # Distinctive per subject, so a crop of the wrong one cannot pass for the right one.
             tone = 40 + 60 * int(subject["index"])
-            arr = np.zeros((64, 96, 3), np.uint8)
+            arr = np.zeros((128, 192, 3), np.uint8)
             arr[..., 0], arr[..., 1], arr[..., 2] = tone, 200 - tone, 128
             Image.fromarray(arr).save(os.path.join(str(job), name))
             subject["ref_file"] = name
@@ -297,7 +297,7 @@ def test_the_node_hands_over_the_narrowed_pick_and_its_subject_reference(tmp_pat
     # rides on the `subject_index` OUTPUT above, never inside the payload.
     assert set(pick) == set(payload)
     assert "subject_index" not in pick and "plan_match_frame" not in pick
-    assert tuple(reference.shape) == (1, 64, 96, 3)
+    assert tuple(reference.shape) == (1, 128, 192, 3)
     assert abs(float(reference[0, 0, 0, 0]) - 40.0 / 255.0) < 0.01
     assert "subject 0" in report
     assert str(job) in report

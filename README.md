@@ -1280,7 +1280,7 @@ or leave it and set **mode** to Increment Value - the default - and let the **pa
 | Output | Goes to |
 |---|---|
 | `face_pick` | **H3 Face Track + Crop → `face_pick`**, and on to **H3 Pass Save** if you checkpoint the crops. |
-| `subject_reference` | H3's `ref_image_*` slots, and **nowhere else**. For a whole-still subject it is the entire reference still. |
+| `subject_reference` | H3's `ref_image_*` slots, and **nowhere else**. For a whole-still subject it is the entire reference still. A too-small crop is lifted to H3's minimum reference size (128px): H3 VAE-encodes a reference at /16 and a DiT patch conv needs a 7-wide latent, so a smaller one crashes the node; new plans cut real pixels up to that floor, and a crop already on disk is enlarged to it (the report says so). |
 | `reference_exists` | `1` / `0`. `0` means this subject has no subject reference — a normal state of a plan under `unmatched_faces=no_reference`, not an error, and it means nothing is wired into the H3 node's reference slots. |
 | `subject_index` | **H3 Pass Save** and **H3 Pass Load → `subject`**, so the pass and the selection can never disagree. |
 | `report` | who was chosen, which frame each shot locks onto, where the reference came from, and this subject's **shot account**. |

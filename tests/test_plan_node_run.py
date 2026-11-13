@@ -439,3 +439,28 @@ def test_the_reference_reader_still_says_so_for_a_no_reference_subject(pack, mon
     assert "no subject reference" in note
     assert "unmatched_faces" in note
 
+
+def test_a_tiny_saved_reference_is_lifted_to_h3s_floor(pack, tmp_path):
+    """A job folder cut before the crop floor (or a still smaller than it) still reaches a pass
+    as a too-small PNG. H3 crashes on a reference whose /16 latent is under its 7-wide patch
+    conv, so the reader lifts the IMAGE to the floor and says so, rather than handing H3 a crop
+    it cannot encode."""
+    import os
+
+    import numpy as np
+    from PIL import Image
+
+    job = tmp_path / "output" / "tiny ref"
+    os.makedirs(str(job), exist_ok=True)
+    # A 30x40 crop: its /16 latent (~2-3) is under H3's 7-wide patch conv.
+    Image.fromarray((np.full((40, 30, 3), 128, np.uint8))).save(str(job / "subject_0.png"))
+    subject = {"index": 0, "ref_file": "subject_0.png", "ref_kind": "crop"}
+
+    reference, exists, note = pack.multi_face_nodes.load_subject_reference(str(job), subject)
+
+    assert exists == 1 and reference is not None
+    h, w = int(reference.shape[1]), int(reference.shape[2])
+    edge = pack.plan_store.MIN_H3_REF_EDGE
+    assert h >= edge and w >= edge and min(h, w) == edge
+    assert "under H3's minimum reference size" in note
+
