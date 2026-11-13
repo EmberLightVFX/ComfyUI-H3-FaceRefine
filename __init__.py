@@ -51,7 +51,7 @@ except Exception as _exc:  # the nodes must load even if the picker route does n
 # (clip_N.png) and the reference crop (subject_N.png) - read out of the job folder. The preview
 # route has one read-only route and its own front-end script, and writes nothing to disk - the
 # panel's per-face toggle edits only the node's typed `excluded_faces` widget, which the node
-# re-applies on the next Process Plan. A second button, Process Plan, previews new settings
+# re-applies on the next Preview Re-plan. A second button, Preview Re-plan, previews new settings
 # without tripping the fingerprint guard by running the plan node itself into a throwaway
 # `<job_name>__preview_*` folder (non-destructive: the real job is never touched). Registered the
 # same way as the picker, so the nodes still load if the route does not register.

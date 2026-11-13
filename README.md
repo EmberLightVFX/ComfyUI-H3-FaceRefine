@@ -1202,12 +1202,12 @@ graph. Each face row carries an **Ignore this face** / **Include this face again
 switched-off face carries **Restore**. These write **only** the node's own `excluded_faces` widget —
 the single sanctioned control for switching a face off (the same typed widget, so a low-confidence
 face that got matched twice can be switched off once and refined only once). They set no pairing
-directly and re-plan nothing in the browser: the plan node re-decides on the next **Process Plan**,
+directly and re-plan nothing in the browser: the plan node re-decides on the next **Preview Re-plan**,
 so the panel never becomes a second source of truth, and the passes are always cut against the
 node's decision, not the panel's. A pending toggle is shown in the switched-off list until you
 re-plan, then applied. There is still no click-to-*re-pair* editor — re-pairing is a later ticket.
 
-Above it is **Process Plan**, which is *not* read-only but is **non-destructive**: it runs the
+Above it is **Preview Re-plan**, which is *not* read-only but is **non-destructive**: it runs the
 plan node — with its own detection, pairing, preview and crops — into a throwaway job folder
 (`<job_name>__preview_<stamp>`) and opens the read-only panel on that. So you can change
 `unmatched_faces`, `max_subjects`, `match_frame`, the tolerance and so on and check the new pairing
