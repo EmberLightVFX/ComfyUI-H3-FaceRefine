@@ -91,7 +91,7 @@ A face found at the match frame that the user has switched off, so it never beco
 _Avoid_: disabled face, ignored face, skipped track
 
 **Manual pairing** (`pair_overrides`):
-A pairing the user over-rode when the automatic positional guess matched the wrong two faces — set from the pairing panel's Re-pair grid or by hand as `face=partner` (`0=s2`, `s1=0`, `2=none`). It replaces the positional pairing before subjects are settled, is recorded in the plan and compared by the pairing fingerprint, and re-pairs the whole job — so that job's passes must be re-run. Not the same as excluding a face: a re-paired face still becomes a subject.
+A pairing the user over-rode when the automatic positional guess matched the wrong two faces — set by clicking a face image in the pairing panel, or by hand as `face=partner` (`0=s2`, `s1=0`, `2=none`). It replaces the positional pairing before subjects are settled, is recorded in the plan and compared by the pairing fingerprint, and re-pairs the whole job — so that job's passes must be re-run. Not the same as excluding a face: a re-paired face still becomes a subject.
 _Avoid_: re-match, force match, override (too vague)
 
 **Unpaired face**:

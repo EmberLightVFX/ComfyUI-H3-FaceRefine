@@ -83,6 +83,10 @@ function styleOnce() {
         ".h3pp-face.cur span{color:#f0c674}",
         ".h3pp-face.noneopt{color:#ccc;min-width:96px;align-items:center;justify-content:center;",
         "  font:12px sans-serif}",
+        ".h3pp-thumb.clickable{cursor:pointer}",
+        ".h3pp-thumb.clickable:hover .h3pp-crop{border-color:#e0c060}",
+        ".h3pp-thumb.clickable:hover .h3pp-nocrop{border-color:#e0c060}",
+        ".h3pp-hint{font:11px sans-serif;color:#7aa0c8;margin-top:2px;text-align:center}",
     ].join("\n");
     document.head.appendChild(s);
 }
@@ -159,8 +163,9 @@ function showWait(d, node) {
 
 /* ------------------------------------------------------------------ render */
 
-function thumb(url, cap, missing) {
+function thumb(url, cap, missing, onPick, hint) {
     const col = el("div", "h3pp-thumb");
+    if (onPick) col.classList.add("clickable");
     if (url) {
         const img = el("img", "h3pp-crop");
         img.src = api.apiURL(url);
@@ -170,19 +175,28 @@ function thumb(url, cap, missing) {
         col.appendChild(el("div", "h3pp-nocrop", missing));
     }
     col.appendChild(el("small", "h3pp-cap", cap));
+    if (onPick) {
+        if (hint) col.appendChild(el("small", "h3pp-hint", hint));
+        col.onclick = onPick;
+    }
     return col;
 }
 
-function cropCell(s) {
+function cropCell(s, onPickClip, onPickRef) {
     // Both faces of the subject side by side: the clip face on the match frame, and the
     // reference it is conditioned on. A still-only subject has no clip face, so it shows the
-    // placeholder instead of an image.
+    // placeholder instead of an image. Either image is pressable where that side can be
+    // re-pointed: click the clip face to pick a new clip face for the subject, click the
+    // reference to pick a new reference still face. A side with nothing to re-point is not
+    // clickable.
     const wrap = el("div", "h3pp-crops");
-    wrap.appendChild(thumb(s.clip_url, "clip face", "no clip face\non the match frame"));
+    wrap.appendChild(thumb(s.clip_url, "clip face", "no clip face\non the match frame",
+        onPickClip, "click to pick clip face"));
     const why = !s.has_reference
         ? "no subject reference\n(unmatched_faces=no_reference)"
         : "reference file missing\nre-run H3 Multi-Face Plan";
-    wrap.appendChild(thumb(s.ref_url, s.ref_file || "reference", why));
+    wrap.appendChild(thumb(s.ref_url, s.ref_file || "reference", why,
+        onPickRef, "click to pick reference face"));
     return wrap;
 }
 
@@ -304,51 +318,26 @@ function faceCell(face, currentToken, onPick) {
     return cell;
 }
 
-// The re-pairing grid: press a subject's face and choose, per plate, which face it should be
-// matched to. The reference side lists every reference still face; the clip side lists every
-// target clip face; each also offers "no partner". A pick writes the widget and the caller shows
-// the "press Process Plan to apply" hint.
-function openRePairGrid(node, data, subject, apply) {
-    const g = dialog("Re-pair - subject " + subject.index);
+// The face chooser: press one of a subject's face images and choose which face that side should be
+// matched to. `candidates` is every face on the relevant plate; the cell matching the current
+// choice is marked; a "no partner" button switches that side's partner off. A pick writes the
+// node's pair_overrides widget - the plan node re-pairs the whole job when Process Plan runs.
+// `apply(faceToken, pickedToken)` is the caller's handler; faceToken says which face is being
+// re-pointed and pickedToken is the chosen face's token or the word none.
+function openFaceChooser(node, data, faceToken, candidates, currentToken, title, apply) {
+    const g = dialog(title);
     g.body.appendChild(el("p", "h3pp-note",
-        "Choose which face each side of this subject is matched to. The reference side picks the "
-        + "REFERENCE STILL face; the clip side picks the TARGET CLIP face. 'no partner' switches "
-        + "that side's partner off. This writes the node's pair_overrides widget - press Process "
-        + "Plan to apply it, and note it re-pairs the whole job, so its passes must be re-run."));
-
-    const pick = (faceToken) => (token) => { g.close(); apply(faceToken, token); };
-
-    if (subject.clip_face !== null && subject.clip_face !== undefined) {
-        const faceToken = String(subject.clip_face);
-        const cur = (subject.still_face === null || subject.still_face === undefined)
-            ? null : "s" + subject.still_face;
-        g.body.appendChild(el("h4", "h3pp-sect", "reference (a REFERENCE STILL face)"));
-        const grid = el("div", "h3pp-facegrid");
-        for (const f of (data.still_faces || [])) grid.appendChild(faceCell(f, cur, pick(faceToken)(f.token)));
-        const none = el("button", "h3pp-face noneopt", "no partner");
-        none.onclick = pick(faceToken)("none");
-        grid.appendChild(none);
-        g.body.appendChild(grid);
+        "Pick which face to use for this side, or no partner. This writes the node's pair_overrides "
+        + "widget - press Process Plan to apply it, and note it re-pairs the whole job, so its "
+        + "passes must be re-run."));
+    const grid = el("div", "h3pp-facegrid");
+    for (const f of (candidates || [])) {
+        grid.appendChild(faceCell(f, currentToken, () => { g.close(); apply(faceToken, f.token); }));
     }
-
-    if (subject.still_face !== null && subject.still_face !== undefined) {
-        const faceToken = "s" + subject.still_face;
-        const cur = (subject.clip_face === null || subject.clip_face === undefined)
-            ? null : String(subject.clip_face);
-        g.body.appendChild(el("h4", "h3pp-sect", "clip side (a TARGET CLIP face)"));
-        const grid = el("div", "h3pp-facegrid");
-        for (const f of (data.clip_faces || [])) grid.appendChild(faceCell(f, cur, pick(faceToken)(f.token)));
-        const none = el("button", "h3pp-face noneopt", "no partner");
-        none.onclick = pick(faceToken)("none");
-        grid.appendChild(none);
-        g.body.appendChild(grid);
-    }
-
-    if ((subject.clip_face === null || subject.clip_face === undefined)
-            && (subject.still_face === null || subject.still_face === undefined)) {
-        g.body.appendChild(el("p", "h3pp-note", "this face has neither a clip face nor a still face to re-pair."));
-    }
-
+    const none = el("button", "h3pp-face noneopt", "no partner");
+    none.onclick = () => { g.close(); apply(faceToken, "none"); };
+    grid.appendChild(none);
+    g.body.appendChild(grid);
     g.foot.appendChild(button("Close", "", g.close));
 }
 
@@ -356,9 +345,9 @@ function render(d, data, node, name) {
     d.body.innerHTML = "";
     d.foot.innerHTML = "";
     d.foot.appendChild(el("span", "h3pp-msg",
-        "toggles edit the node's excluded_faces widget; Re-pair edits its pair_overrides widget. "
-        + "Process Plan re-runs the node into job_name and REPLACES its plan (the previous "
-        + "plan.json is kept as plan_prev.json)"));
+        "toggles edit the node's excluded_faces widget; click a face image to re-pair it (writes "
+        + "pair_overrides). Process Plan re-runs the node into job_name and REPLACES its plan (the "
+        + "previous plan.json is kept as plan_prev.json)"));
     const refresh = button("Refresh", "", () => { d.close(); openPanel(node, name); });
 
     if (!data.ready) {
@@ -415,7 +404,7 @@ function render(d, data, node, name) {
     const tokenSet = new Set(widgetTokens);
 
     d.body.appendChild(el("h4", "h3pp-sect",
-        "subjects (Ignore switches this face off in excluded_faces; Process Plan applies it)"));
+        "subjects (Ignore switches a face off; click a face image to re-pair that side)"));
     for (const s of (data.subjects || [])) {
         const row = el("div", "h3pp-row");
         const cell = el("div", "h3pp-cell");
@@ -436,20 +425,28 @@ function render(d, data, node, name) {
                         "' - press Process Plan to apply (this panel still shows the last plan).";
                 }));
         }
-        const canRePair = (s.clip_face !== null && s.clip_face !== undefined)
-            || (s.still_face !== null && s.still_face !== undefined);
-        if (canRePair) {
-            cell.appendChild(button("Re-pair this subject's faces", "h3pp-toggle", () => {
-                openRePairGrid(node, data, s, (faceToken, partnerToken) => {
-                    const now = applyPairOverride(node, faceToken, partnerToken);
-                    render(d, data, node, name);
-                    d.msg.textContent = "pair_overrides on the node is now '" + now +
-                        "' - press Process Plan to apply (this panel still shows the last plan).";
-                });
-            }));
-        }
+        // Click either face image to re-pick that side. The clip image re-points the clip side of
+        // the still face this subject tracks (face token s<still>); the reference image re-points
+        // the reference of the clip face this subject tracks (face token <clip>). A side with no
+        // partner on the other plate to re-point is left non-clickable.
+        const applyPick = (faceTok, tok) => {
+            const now = applyPairOverride(node, faceTok, tok);
+            render(d, data, node, name);
+            d.msg.textContent = "pair_overrides on the node is now '" + now +
+                "' - press Process Plan to apply (this panel still shows the last plan).";
+        };
+        const canClip = (s.still_face !== null && s.still_face !== undefined);
+        const canRef = (s.clip_face !== null && s.clip_face !== undefined);
+        const curClip = (s.clip_face === null || s.clip_face === undefined) ? null : String(s.clip_face);
+        const curRef = (s.still_face === null || s.still_face === undefined) ? null : "s" + s.still_face;
+        const onPickClip = canClip ? () => openFaceChooser(
+            node, data, "s" + s.still_face, data.clip_faces, curClip,
+            "Subject " + s.index + ": pick the clip face", applyPick) : null;
+        const onPickRef = canRef ? () => openFaceChooser(
+            node, data, String(s.clip_face), data.still_faces, curRef,
+            "Subject " + s.index + ": pick the reference face", applyPick) : null;
         row.appendChild(cell);
-        row.appendChild(cropCell(s));
+        row.appendChild(cropCell(s, onPickClip, onPickRef));
         d.body.appendChild(row);
     }
 

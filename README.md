@@ -1043,7 +1043,7 @@ subject, so it has to be visible at the node that made it.
 | `job_name` | empty | The **job folder** under ComfyUI's output folder. Left blank it is named after the clip. **Keep the same name to resume a job** — change it, or change any input the fingerprint tracks, and the nodes refuse rather than mixing two pairings into one clip. |
 | `unmatched_faces` | `leave` | What becomes of an **unpaired face** — a face on one plate with no partner on the other. It decides the **subject set**, so it lives here rather than on the pass nodes, and it is recorded in `plan.json`. See [`unmatched_faces`](#unmatched_faces-three-answers). |
 | `crop_factor` | `2.5` | The crop factor **H3 Face Track + Crop** will use for this job. Set it to that node's `crop_factor`, and to nothing else: each **subject reference** is cut with the rectangle that factor gives — crop_factor × face height, centred on the face, mapped into the **reference still** at its native resolution. A number that differs from the tracker's mis-frames every reference in the job, so it is recorded in `plan.json` (the overlap warnings, the pairing preview and a resumed job all read it back from there) and it joins the **pairing fingerprint**. |
-| `pair_overrides` | empty | Manual pairings, for when the automatic pairing matched the **wrong** two faces. Set from the pairing panel's **Re-pair** grid or by hand: comma-separated `face=partner`, where a face is a bare **target clip** number or an `s`-prefixed **reference still** number, and the partner is another face on the other plate or `none` — e.g. `0=s2` (clip face 0's reference is still face 2), `s1=0` the same fact from the other side, `2=none` to switch a face's partner off. A manual pairing over-rides the positional guess, and the plan node re-pairs the whole job when **Process Plan** runs, so its passes must be re-run. Recorded in `plan.json` and part of the **pairing fingerprint**. |
+| `pair_overrides` | empty | Manual pairings, for when the automatic pairing matched the **wrong** two faces. Set by clicking a face image in the pairing panel, or by hand: comma-separated `face=partner`, where a face is a bare **target clip** number or an `s`-prefixed **reference still** number, and the partner is another face on the other plate or `none` — e.g. `0=s2` (clip face 0's reference is still face 2), `s1=0` the same fact from the other side, `2=none` to switch a face's partner off. A manual pairing over-rides the positional guess, and the plan node re-pairs the whole job when **Process Plan** runs, so its passes must be re-run. Recorded in `plan.json` and part of the **pairing fingerprint**. |
 
 **Outputs**
 
@@ -1207,13 +1207,14 @@ face that got matched twice can be switched off once and refined only once). The
 directly and re-plan nothing in the browser: the plan node re-decides on the next **Process Plan**,
 so the panel never becomes a second source of truth, and the passes are always cut against the
 node's decision, not the panel's. A pending toggle is shown in the switched-off list until you
-re-plan, then applied. There is also a click-to-**re-pair** editor: each face row carries **Re-pair
-this subject's faces**, opening a grid of every found reference-still face (for that subject's
-reference) and every found target-clip face (for its clip side) — a thumbnail where the plan node
-already cut one and the face number otherwise — plus a **no partner** choice. Picking writes **only**
-the node's `pair_overrides` widget (`0=s2`, `s1=0`, `2=none`, …), which over-rides the positional
-guess; the plan node re-pairs the whole job on the next **Process Plan**, so the panel still decides
-nothing of its own and that job's passes have to be re-run.
+re-plan, then applied. There is also a click-to-re-pair editor: **click the clip-face image** to
+pick which target-clip face this subject tracks, or **click the reference image** to pick which
+reference-still face it is conditioned on. Each opens a grid of every face on that plate — a
+thumbnail where the plan node already cut one and the face number otherwise, the current match
+marked — plus a **no partner** choice. Picking writes **only** the node's `pair_overrides` widget
+(`0=s2`, `s1=0`, `2=none`, …), which over-rides the positional guess; the plan node re-pairs the
+whole job on the next **Process Plan**, so the panel still decides nothing of its own and that job's
+passes have to be re-run.
 
 Above it is **Process Plan**, which is *not* read-only: it re-runs the plan node into this node's
 `job_name` and **replaces** that job's plan. To get past the pairing-fingerprint guard (which
