@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-h3-facerefine"
 description = "Refine and improve the quality of small faces in MiniMax H3 video: per-frame face tracking, normalised crops, AV-latent injection and feathered stitch-back."
-version = "1.1.2"
+version = "1.2.0"
 license = { file = "LICENSE" }
 requires-python = ">=3.9"
 readme = "README.md"
@@ -32,6 +32,23 @@ dependencies = [
 [project.urls]
 Repository = "https://github.com/Carasibana/ComfyUI-H3-FaceRefine"
 "Bug Tracker" = "https://github.com/Carasibana/ComfyUI-H3-FaceRefine/issues"
+
+# Test-only requirements, kept out of `dependencies`: a ComfyUI user installing the pack
+# through the registry must never pull pytest. `tests/` runs on numpy alone - no ComfyUI,
+# no torch, no weights, no GPU - which is what makes the geometry under multi-face
+# pairing testable at all (see h3_collection.py and .github/workflows/tests.yml).
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The pack root is the import root for `plan_store` / `multi_face_nodes`. It is also a
+# ComfyUI package whose `__init__.py` needs ComfyUI itself, so `h3_collection` keeps it
+# out of the collection tree as a package - see that module for why.
+pythonpath = ["."]
+addopts = ["-p", "h3_collection"]
 
 [tool.comfy]
 PublisherId = "carasibana"

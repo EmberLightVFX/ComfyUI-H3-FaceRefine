@@ -18,7 +18,22 @@ push-in, which hands H3 exactly the small face it fails on.
 
 import os
 
-from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from .nodes import NODE_CLASS_MAPPINGS as _RELEASED_CLASS_MAPPINGS
+from .nodes import NODE_DISPLAY_NAME_MAPPINGS as _RELEASED_DISPLAY_NAME_MAPPINGS
+
+# The multi-face nodes live in their own modules and are wired up here (ADR 0006). The
+# released seven keep their names and their input schemas exactly as they were (ADR 0002),
+# so saved workflows keep meaning what they meant - which is also why the merged mappings
+# are new dicts rather than an in-place update of `nodes.py`'s.
+from .multi_face_nodes import CUSTOM_TYPES as CUSTOM_TYPES
+from .multi_face_nodes import NODE_CLASS_MAPPINGS as _MULTI_FACE_CLASS_MAPPINGS
+from .multi_face_nodes import NODE_DISPLAY_NAME_MAPPINGS as _MULTI_FACE_DISPLAY_NAME_MAPPINGS
+
+# The one new custom type: H3FACEPLAN, the subject plan (ADR 0005). Every pass reuses the
+# existing H3FACEPICK / H3FACEXFORM shapes.
+NODE_CLASS_MAPPINGS = {**_RELEASED_CLASS_MAPPINGS, **_MULTI_FACE_CLASS_MAPPINGS}
+NODE_DISPLAY_NAME_MAPPINGS = {**_RELEASED_DISPLAY_NAME_MAPPINGS,
+                              **_MULTI_FACE_DISPLAY_NAME_MAPPINGS}
 
 # Face picker: a button on H3 Load Video + Face Select that shows the detected faces
 # and writes the chosen index per shot into confirmed_pick.
@@ -31,4 +46,17 @@ try:
 except Exception as _exc:  # the nodes must load even if the picker route does not
     print("[H3FaceRefine] face picker unavailable: %s" % _exc)
 
-__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+# The read-only pairing preview (#9): a panel on H3 Multi-Face Plan showing the plan node's own
+# pairing preview image and every subject's reference crop, read out of the job folder. It has
+# one route, its own front-end script, and it writes nothing - exclusions stay the typed
+# `excluded_faces` widget. Registered the same way as the picker, so the nodes still load if the
+# route does not register.
+try:
+    from . import pair_preview_api
+
+    pair_preview_api.register()
+except Exception as _exc:  # the nodes must load even if the preview route does not
+    print("[H3FaceRefine] pairing preview unavailable: %s" % _exc)
+
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "CUSTOM_TYPES",
+           "WEB_DIRECTORY"]
