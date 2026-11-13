@@ -347,7 +347,13 @@ async function waitForPrompt(promptId, d) {
     for (;;) {
         await new Promise((res) => setTimeout(res, 500));
         let hist;
-        try { hist = await api.fetch("/history/" + promptId); } catch (e) { hist = null; }
+        // The frontend's api object has no .fetch() - the whole pack uses global fetch on
+        // api.apiURL(...) (see openPanel and h3_face_select.js). A 404 while the job is still
+        // queued is normal, so fall back to null rather than throwing.
+        try {
+            const hr = await fetch(api.apiURL("/history/" + encodeURIComponent(promptId)));
+            hist = hr.ok ? await hr.json() : null;
+        } catch (e) { hist = null; }
         const entry = hist && hist[promptId];
         const status = entry && entry.status;
         if (status && status.status_str === "error") {
@@ -411,14 +417,19 @@ async function replanPreview(node) {
     if (api.clientId) payload.client_id = api.clientId;
     let promptId;
     try {
-        const r = await api.fetch("/prompt", {
+        const r = await fetch(api.apiURL("/prompt"), {
             method: "POST",
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
         });
-        if (r.error || (r.node_errors && Object.keys(r.node_errors).length)) {
-            throw new Error(JSON.stringify(r.node_errors || r.error));
+        const resp = await r.json().catch(() => ({}));
+        // A bad prompt comes back non-2xx with error / node_errors / error_details in the body;
+        // surface that rather than treating a missing prompt_id as success.
+        const errs = resp.node_errors || resp.error_details || resp.error;
+        if (!r.ok || resp.error || (resp.node_errors && Object.keys(resp.node_errors).length)) {
+            throw new Error(typeof errs === "string" ? errs : JSON.stringify(errs || ("HTTP " + r.status)));
         }
-        promptId = r.prompt_id;
+        promptId = resp.prompt_id;
     } catch (e) {
         d.head.textContent = "Process Plan - run rejected";
         d.body.textContent = String(e);
