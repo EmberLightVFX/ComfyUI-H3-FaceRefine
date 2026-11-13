@@ -15,6 +15,72 @@ import plan_store as ps
 
 # --- pairing: positional, measured at the match frame -------------------------------
 
+# --- replacing a plan: clear the plan node's own artifacts, keep pass stages -----------------
+
+def _seed_job(tmp_path, first_plan="OLD"):
+    job = os.path.join(str(tmp_path), "job")
+    os.makedirs(os.path.join(job, "passes", "subject_0000"), exist_ok=True)
+
+    def touch(*rel, content="x"):
+        path = os.path.join(job, *rel)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        return path
+
+    touch(ps.PLAN_FILENAME, content=first_plan)
+    touch(ps.PREVIEW_FILENAME)
+    touch("subject_0.png")
+    touch("subject_1.png")
+    touch("clip_0.png")
+    touch("manifest.json", content="MANIFEST")
+    touch("passes", "subject_0000", "crops.json", content="CROPS")
+    touch("subject_notes.txt", content="keep")   # starts with subject_ but is not a crop
+    return job
+
+
+def test_replacing_a_plan_backs_it_up_and_removes_only_the_plan_node_artifacts(tmp_path):
+    job = _seed_job(tmp_path)
+
+    res = ps.clear_plan_artifacts_for_replace(job)
+
+    assert res["existed"] is True
+    assert res["prev"] == ps.PLAN_PREV_FILENAME
+    assert sorted(res["cleared"]) == ["clip_0.png", ps.PREVIEW_FILENAME,
+                                      "subject_0.png", "subject_1.png"]
+    # The old plan is kept under the backup name, so a replacement is recoverable.
+    with open(os.path.join(job, ps.PLAN_PREV_FILENAME), encoding="utf-8") as fh:
+        assert fh.read() == "OLD"
+    # plan.json is gone, so the next plan-node run into this name writes fresh (nothing to guard).
+    assert not os.path.isfile(os.path.join(job, ps.PLAN_FILENAME))
+    # Pass stages are left alone: their own nodes' guards handle them, not the replace.
+    assert os.path.isfile(os.path.join(job, "manifest.json"))
+    with open(os.path.join(job, "passes", "subject_0000", "crops.json"), encoding="utf-8") as fh:
+        assert fh.read() == "CROPS"
+    # A file that merely starts with subject_ but is not an <int>.png crop survives.
+    assert os.path.isfile(os.path.join(job, "subject_notes.txt"))
+
+
+def test_replacing_a_plan_twice_keeps_only_the_one_previous_plan(tmp_path):
+    job = os.path.join(str(tmp_path), "job")
+    os.makedirs(job)
+    with open(os.path.join(job, ps.PLAN_FILENAME), "w", encoding="utf-8") as fh:
+        fh.write("A")
+    ps.clear_plan_artifacts_for_replace(job)          # A -> plan_prev
+    with open(os.path.join(job, ps.PLAN_FILENAME), "w", encoding="utf-8") as fh:
+        fh.write("B")
+
+    res = ps.clear_plan_artifacts_for_replace(job)    # B -> plan_prev, dropping A
+
+    assert res["prev"] == ps.PLAN_PREV_FILENAME
+    with open(os.path.join(job, ps.PLAN_PREV_FILENAME), encoding="utf-8") as fh:
+        assert fh.read() == "B"
+
+
+def test_clear_plan_artifacts_reports_a_missing_job_folder(tmp_path):
+    assert ps.clear_plan_artifacts_for_replace(os.path.join(str(tmp_path), "nope")) == {
+        "existed": False, "cleared": [], "prev": None}
+
+
 def test_identical_plates_pair_by_position():
     """Two plates framed identically: each face finds the face in the same place."""
     clip = [[100, 100, 200, 220], [400, 120, 520, 260]]

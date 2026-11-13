@@ -49,11 +49,12 @@ except Exception as _exc:  # the nodes must load even if the picker route does n
 # The pairing preview (#9): a panel on H3 Multi-Face Plan showing the plan node's own pairing
 # preview image and, per subject, BOTH faces side by side - the clip face on the match frame
 # (clip_N.png) and the reference crop (subject_N.png) - read out of the job folder. The preview
-# route has one read-only route and its own front-end script, and writes nothing to disk - the
-# panel's per-face toggle edits only the node's typed `excluded_faces` widget, which the node
-# re-applies on the next Preview Re-plan. A second button, Preview Re-plan, previews new settings
-# without tripping the fingerprint guard by running the plan node itself into a throwaway
-# `<job_name>__preview_*` folder (non-destructive: the real job is never touched). Registered the
+# route has one read-only route plus one narrow write action, and its own front-end script: the
+# panel's per-face toggle edits only the node's typed `excluded_faces` widget (which the node
+# re-decides on), and a `pair_preview/replace` POST clears a job's OWN stale plan artifacts (the
+# previous plan kept as `plan_prev.json`, plus the preview and subject/clip crops) so the plan node
+# can re-run into the same `job_name` and REPLACE the plan. The second button, Process Plan, does
+# exactly that; it authors no pairing itself and never touches pass stages. Registered the
 # same way as the picker, so the nodes still load if the route does not register.
 try:
     from . import pair_preview_api

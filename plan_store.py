@@ -50,6 +50,10 @@ PLAN_FILENAME = "plan.json"
 # draws it; nothing else writes it.
 PREVIEW_FILENAME = "pairing_preview.png"
 
+# A job's previous plan: "replace the plan" moves the old plan.json here before the plan node
+# writes the new one, so a replacement stays reversible. Never read as input by any node.
+PLAN_PREV_FILENAME = "plan_prev.json"
+
 SUBJECT_SOURCES = ("target_clip", "reference_still", "union")
 
 # What to do with a face that found no partner on the other plate (#8). This belongs to the PLAN
@@ -991,6 +995,54 @@ def job_dir_for(base_dir, job_name) -> str:
 def plan_path(job_dir) -> str:
     """Where a job's subject plan lives."""
     return os.path.join(str(job_dir), PLAN_FILENAME)
+
+
+def _is_plan_artifact(name) -> bool:
+    """Is this top-level job-folder file one the PLAN node itself wrote (not a pass stage)?
+
+    The plan node writes ``pairing_preview.png`` and a crop per subject as ``subject_<int>.png``
+    and ``clip_<int>.png``. ``manifest.json`` and everything under ``passes/`` belong to the pass
+    pipeline and are deliberately NOT plan artifacts, so a replace never touches them - those
+    nodes keep their own guards against mixing pairings.
+    """
+    if name in (PLAN_FILENAME, PREVIEW_FILENAME):
+        return True
+    for prefix in ("subject_", "clip_"):
+        if name.startswith(prefix) and name.endswith(".png"):
+            if name[len(prefix):-len(".png")].isdigit():
+                return True
+    return False
+
+
+def clear_plan_artifacts_for_replace(job_dir) -> dict:
+    """Make one job's plan replaceable by the plan node, without authoring any pairing here.
+
+    Moves the old ``plan.json`` to ``plan_prev.json`` and deletes the pairing preview and the
+    subject/clip crops the plan node wrote, so a plan-node re-run into the SAME job_name writes a
+    fresh plan instead of tripping the pairing-fingerprint guard (which refuses to keep two
+    pairings in one folder). Pass stages - ``manifest.json`` and ``passes/`` - are left alone: if
+    they belong to the old pairing, the pass/composite nodes' own guards refuse them, which is the
+    correct outcome of replacing a plan. Returns ``{"existed", "cleared", "prev"}``.
+    """
+    job = str(job_dir)
+    if not os.path.isdir(job):
+        return {"existed": False, "cleared": [], "prev": None}
+    cleared: list = []
+    prev = None
+    for name in sorted(os.listdir(job)):
+        full = os.path.join(job, name)
+        if not os.path.isfile(full):
+            continue
+        if name == PLAN_FILENAME:
+            os.replace(full, os.path.join(job, PLAN_PREV_FILENAME))
+            prev = PLAN_PREV_FILENAME
+            continue
+        if name == PLAN_PREV_FILENAME:
+            continue  # the move above overwrites the older backup; keep at most one prior plan
+        if _is_plan_artifact(name):
+            os.remove(full)
+            cleared.append(name)
+    return {"existed": True, "cleared": cleared, "prev": prev}
 
 
 def _json_default(value):

@@ -1202,19 +1202,20 @@ graph. Each face row carries an **Ignore this face** / **Include this face again
 switched-off face carries **Restore**. These write **only** the node's own `excluded_faces` widget —
 the single sanctioned control for switching a face off (the same typed widget, so a low-confidence
 face that got matched twice can be switched off once and refined only once). They set no pairing
-directly and re-plan nothing in the browser: the plan node re-decides on the next **Preview Re-plan**,
+directly and re-plan nothing in the browser: the plan node re-decides on the next **Process Plan**,
 so the panel never becomes a second source of truth, and the passes are always cut against the
 node's decision, not the panel's. A pending toggle is shown in the switched-off list until you
 re-plan, then applied. There is still no click-to-*re-pair* editor — re-pairing is a later ticket.
 
-Above it is **Preview Re-plan**, which is *not* read-only but is **non-destructive**: it runs the
-plan node — with its own detection, pairing, preview and crops — into a throwaway job folder
-(`<job_name>__preview_<stamp>`) and opens the read-only panel on that. So you can change
-`unmatched_faces`, `max_subjects`, `match_frame`, the tolerance and so on and check the new pairing
-**without** tripping the pairing-fingerprint guard on your real job. Your real job folder and its
-passes are never touched; when you are happy with the pairing, leave the real `job_name` (and its
-same inputs) on the node and queue. Each click writes a fresh `__preview_*` folder, so two
-re-plans with different settings never collide; these throwaway folders are safe to delete.
+Above it is **Process Plan**, which is *not* read-only: it re-runs the plan node into this node's
+`job_name` and **replaces** that job's plan. To get past the pairing-fingerprint guard (which
+refuses to keep two pairings in one folder), the panel first clears the plan node's OWN stale
+artifacts — the previous `plan.json` is kept as `plan_prev.json`, and the preview and the
+subject/clip crops are removed — then the node detects, pairs and writes fresh into the same name.
+It authors no pairing itself, and it never touches pass stages (`manifest.json`, `passes/`): if
+those belonged to the previous pairing, the Pass/Composite nodes' own guards refuse them, so
+replacing a plan means its passes have to be re-run. Use it to commit an Ignore toggle, or a
+changed pairing, to the job you are about to queue.
 
 It **refuses to open or refresh while a render is running**, with no override, and the front end
 and the route enforce that independently:
