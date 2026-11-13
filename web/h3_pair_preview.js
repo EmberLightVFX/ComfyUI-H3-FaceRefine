@@ -8,12 +8,14 @@ import { api } from "../../scripts/api.js";
 // already decides it and already draws both plates with every face outlined and numbered; this
 // panel reads that decision back out of the job folder over one JSON route and shows it.
 //
-// Nothing here writes to disk and no write-route is posted to: the panel is read off the job
-// folder. The ONE thing it can change is the node's own `excluded_faces` widget, through a
-// per-face include/ignore toggle. That widget is the single sanctioned control for switching a
-// face off, so editing it does not make the panel a second source of truth: a toggle only sets
-// the widget, and the plan node still re-decides everything when you press Preview Re-plan. Nothing
-// is re-planned in this browser. The interactive re-pairing editor is still a later ticket. The
+// The panel is read off the job folder and never authors a pairing. The ONE thing it can change on
+// the node is its own `excluded_faces` widget, through a per-face include/ignore toggle - the
+// single sanctioned control for switching a face off. "Process Plan" then re-runs the plan node
+// into job_name and REPLACES the plan: to let that overwrite past the pairing-fingerprint guard it
+// first clears the plan node's OWN stale artifacts (plan.json -> plan_prev.json, plus the preview
+// and the subject/clip crops) over one narrow, render-guarded route. The panel itself never writes
+// a plan, crop, pairing or pass stage, and pass stages (manifest.json, passes/) are left for the
+// pass/composite nodes' own guards. The interactive re-pairing editor is still a later ticket. The
 // panel is its own front end, separate from the face picker's, so the picker stays untouched.
 //
 // It does keep the picker's one rule: while a prompt is running it refuses. The reason here is
@@ -193,7 +195,7 @@ function chips(list, cls, text) {
 
 // The include/ignore toggle. It reads and writes ONLY the node's `excluded_faces` widget - the
 // one sanctioned control - so the panel never re-decides the pairing itself; the node re-decides
-// when the user presses Preview Re-plan (which serialises this widget). Tokens: a bare number is a
+// when the user presses Process Plan (which serialises this widget). Tokens: a bare number is a
 // clip face, an `s`-prefixed one a reference still face, exactly as the widget and preview number them.
 function tokenLabel(t) {
     return (typeof t === "string" && t[0] === "s")
@@ -238,9 +240,8 @@ function render(d, data, node, name) {
     d.body.innerHTML = "";
     d.foot.innerHTML = "";
     d.foot.appendChild(el("span", "h3pp-msg",
-        "no disk write from this panel - the toggles edit only the node's excluded_faces widget; "
-        + "Preview Re-plan re-runs the node on your current settings into a throwaway folder, and "
-        + "Queue the plan node into its real job_name to apply them"));
+        "the toggles edit only the node's excluded_faces widget. Process Plan re-runs the node "
+        + "into job_name and REPLACES its plan (the previous plan.json is kept as plan_prev.json)"));
     const refresh = button("Refresh", "", () => { d.close(); openPanel(node, name); });
 
     if (!data.ready) {
@@ -255,14 +256,6 @@ function render(d, data, node, name) {
 
     d.head.textContent = "Pairing preview - " + data.job_name + ": " + data.subject_count
         + " subject(s), match frame " + data.match_frame;
-    if (String(name || "").indexOf("__preview_") >= 0) {
-        d.body.appendChild(el("p", "h3pp-note",
-            "PREVIEW only: this is a throwaway folder (" + name + ") built from your CURRENT "
-            + "widgets - it is NOT the job you will queue. A subject-count that differs from what "
-            + "you get reopening from the button just means these settings differ from the "
-            + "committed plan's (check confidence / subject_source / tolerance). The committed job "
-            + "is unchanged until you Queue the plan node into its real job_name."));
-    }
 
     const inputs = data.inputs || {};
     const box = el("div", "h3pp-inputs");
@@ -305,7 +298,7 @@ function render(d, data, node, name) {
     const tokenSet = new Set(widgetTokens);
 
     d.body.appendChild(el("h4", "h3pp-sect",
-        "subjects (Ignore switches this face off in excluded_faces; the next plan run reads it)"));
+        "subjects (Ignore switches this face off in excluded_faces; Process Plan applies it)"));
     for (const s of (data.subjects || [])) {
         const row = el("div", "h3pp-row");
         const cell = el("div", "h3pp-cell");
@@ -323,7 +316,7 @@ function render(d, data, node, name) {
                     const now = applyExclude(node, tok, !off);
                     render(d, data, node, name);
                     d.msg.textContent = "excluded_faces on the node is now '" + now +
-                        "' - press Preview Re-plan to apply (this panel still shows the last plan).";
+                        "' - press Process Plan to apply (this panel still shows the last plan).";
                 }));
         }
         row.appendChild(cell);
@@ -348,7 +341,7 @@ function render(d, data, node, name) {
     if (offTokens.length) {
         d.body.appendChild(el("h4", "h3pp-sect",
             "switched off in the excluded_faces widget - they keep their original pixels " +
-            "(the next plan run reads the widget fresh)"));
+            "(Process Plan applies the widget to a fresh plan)"));
         const wrap = el("div", "h3pp-chips");
         for (const t of offTokens) {
             wrap.appendChild(el("span", "h3pp-chip off", tokenLabel(t)));
@@ -356,7 +349,7 @@ function render(d, data, node, name) {
                 const now = applyExclude(node, t, false);
                 render(d, data, node, name);
                 d.msg.textContent = "excluded_faces on the node is now '" + now +
-                    "' - press Preview Re-plan to apply (this panel still shows the last plan).";
+                    "' - press Process Plan to apply (this panel still shows the last plan).";
             }));
         }
         d.body.appendChild(wrap);
@@ -411,17 +404,14 @@ async function openPanel(node, nameOverride) {
     render(d, data || { ready: false, message: "The pairing route returned nothing." }, node, name);
 }
 
-/* ------------------------------------------------------- scratch re-plan (B) */
+/* ---------------------------------------------------------- process the plan */
 
-// A throwaway job folder so a settings change can be previewed without tripping the pairing
-// fingerprint guard on the real job. It runs the REAL plan node (so detection, pairing, the
-// preview and the crops are exactly what the node would produce) but writes into a scratch name
-// and never touches the job you would queue. Unique per click, so two re-plans with different
-// settings never collide on one scratch folder.
-function scratchName(base) {
-    const clean = (base || "").trim() || "h3job";
-    return clean + "__preview_" + Date.now().toString(36);
-}
+// Process Plan runs the REAL plan node into its real job_name and REPLACES the plan. The plan node
+// guards its folder against mixing two pairings, so before the run we ask the narrow replace route
+// to clear the plan node's OWN stale artifacts (plan.json -> plan_prev.json, the preview, the
+// subject/clip crops). The node then writes a fresh plan with nothing to refuse against. Pass
+// stages are left for the pass/composite nodes' own guards, so an old pass cannot mix with the new
+// plan - replacing a plan means its passes have to be re-run.
 
 // The plan node is an output node, so a prompt of just it plus the nodes that FEED it runs it
 // and stops there - no tracker, sampler or render. Walk the plan's link inputs upstream.
@@ -458,7 +448,7 @@ async function waitForPrompt(promptId, d) {
         if (status && status.status_str === "error") {
             const msgs = (entry.messages || [])
                 .map((m) => (Array.isArray(m) && m[1] ? JSON.stringify(m[1]) : "")).filter(Boolean);
-            d.head.textContent = "Preview Re-plan - the re-plan failed";
+            d.head.textContent = "Process Plan - the re-plan failed";
             d.body.textContent = msgs.join("\n") || status.summary ||
                 "The plan node reported an error (it may have refused: nothing to plan, or a " +
                 "pairing that seeds from a plate holding no faces).";
@@ -469,7 +459,7 @@ async function waitForPrompt(promptId, d) {
             return true;
         }
         if (Date.now() - t0 > 300000) {
-            d.head.textContent = "Preview Re-plan - timed out";
+            d.head.textContent = "Process Plan - timed out";
             d.body.textContent = "The re-plan run did not finish within 5 minutes.";
             d.foot.appendChild(button("Close", "", d.close));
             return false;
@@ -477,22 +467,22 @@ async function waitForPrompt(promptId, d) {
     }
 }
 
-async function replanPreview(node) {
+async function processPlan(node) {
     if (renderRunning()) {
-        const d = dialog("Preview Re-plan");
+        const d = dialog("Process Plan");
         showWait(d, node);
         return;
     }
     const wd = w(node, "job_name");
-    const scratch = scratchName(wd ? String(wd.value || "") : "");
-    const d = dialog("Preview Re-plan - " + scratch);
+    const name = wd ? String(wd.value === null || wd.value === undefined ? "" : wd.value).trim() : "";
+    const d = dialog("Process Plan" + (name ? " - " + name : ""));
     d.msg.textContent = "building a plan-only prompt from the current settingsâ€¦";
 
     let built;
     try {
         built = await app.graphToPrompt();
     } catch (e) {
-        d.head.textContent = "Preview Re-plan - could not read the graph";
+        d.head.textContent = "Process Plan - could not read the graph";
         d.body.textContent = "The front end could not serialize the workflow: " + e;
         d.foot.appendChild(button("Close", "", d.close));
         return;
@@ -501,14 +491,31 @@ async function replanPreview(node) {
     const planId = String(node.id);
     const sub = ancestorSubgraph(prompt, planId);
     if (!sub[planId]) {
-        d.head.textContent = "Preview Re-plan - plan node not in the serialized graph";
+        d.head.textContent = "Process Plan - plan node not in the serialized graph";
         d.body.textContent = "The plan node had no serializable inputs to run on.";
         d.foot.appendChild(button("Close", "", d.close));
         return;
     }
-    // Redirect the plan node's output into the scratch folder: the guard never sees the real job.
+    // Run the plan node into the REAL job_name. Clear its stale plan artifacts first (name-bearing
+    // clicks only) so the fingerprint guard has nothing to refuse on and the node writes fresh.
+    // With the widget blank the node derives a name we cannot see from the browser, so we cannot
+    // pre-clear it: run anyway and surface the node's own refusal if the pairing changed.
     sub[planId].inputs = sub[planId].inputs || {};
-    sub[planId].inputs["job_name"] = scratch;
+    sub[planId].inputs["job_name"] = name;
+    if (name) {
+        try {
+            await fetch(api.apiURL(ROUTE + "/replace"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ job_name: name }),
+            });
+        } catch (e) {
+            d.head.textContent = "Process Plan - could not clear the old plan";
+            d.body.textContent = "The replace route was unreachable: " + e;
+            d.foot.appendChild(button("Close", "", d.close));
+            return;
+        }
+    }
 
     // client_id is optional on /prompt; the frontend keeps it on api.clientId (there is no
     // api.getClientId()). Send it when present, so execution events route back, but never require it.
@@ -530,7 +537,7 @@ async function replanPreview(node) {
         }
         promptId = resp.prompt_id;
     } catch (e) {
-        d.head.textContent = "Preview Re-plan - run rejected";
+        d.head.textContent = "Process Plan - run rejected";
         d.body.textContent = String(e);
         d.foot.appendChild(button("Close", "", d.close));
         return;
@@ -538,8 +545,15 @@ async function replanPreview(node) {
     d.msg.textContent = "detecting and re-pairing on the clip + reference (no render)â€¦";
     const ok = await waitForPrompt(promptId, d);
     if (!ok) return;   // waitForPrompt already wrote the reason into the dialog
+    if (!name) {
+        d.head.textContent = "Process Plan - plan replaced (derived job_name)";
+        d.body.textContent = "The plan node wrote its derived job folder. Set job_name on the node, "
+            + "then reopen the pairing preview to see the new plan.";
+        d.foot.appendChild(button("Close", "", d.close));
+        return;
+    }
     d.close();
-    await openPanel(node, scratch);
+    await openPanel(node, name);
 }
 
 /* --------------------------------------------------------------- register */
@@ -552,13 +566,13 @@ app.registerExtension({
         const created = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = created ? created.apply(this, arguments) : undefined;
-            const replan = this.addWidget("button", "Preview Re-plan", null,
-                                          () => replanPreview(this));
+            const replan = this.addWidget("button", "Process Plan", null,
+                                          () => processPlan(this));
             const btn = this.addWidget("button", "Pairing preview", null,
                                        () => openPanel(this));
             // A button holds no value, so it must not be serialised: a slot in widgets_values
             // would reinterpret every saved widget after it (ADR 0002 - the plan node's widget
-            // order is permanent, and this adds no widget to it). Preview Re-plan is added first so
+            // order is permanent, and this adds no widget to it). Process Plan is added first so
             // it renders above Pairing preview on the node.
             for (const b of [replan, btn]) {
                 if (b) {

@@ -122,6 +122,35 @@ def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
                     max_subjects, job_name, *tail)
 
 
+def test_process_plan_replaces_the_plan_after_clearing_stale_artifacts(pack, monkeypatch, tmp_path):
+    """What the panel's Process Plan button does end to end: the fingerprint guard refuses a changed
+    pairing into an existing folder, but clearing the plan node's OWN artifacts first (the replace
+    route) lets the same run REPLACE the plan in that job_name. The previous plan survives as
+    plan_prev.json, so the replacement is recoverable."""
+    import plan_store as ps
+
+    _run(pack, monkeypatch, mode="no_reference", job_name="replace me")
+    job = pathlib.Path(ps.job_dir_for(str(tmp_path / "output"), "replace me"))
+    assert json.loads((job / ps.PLAN_FILENAME).read_text(encoding="utf-8"))[
+        "inputs"]["unmatched_faces"] == "no_reference"
+
+    # A bare queue with a changed pairing still refuses: the guard is intact for normal runs.
+    with pytest.raises(ValueError) as exc:
+        _run(pack, monkeypatch, mode="with_still", job_name="replace me")
+    assert "unmatched_faces" in str(exc.value)
+
+    # Process Plan clears the plan node's artifacts first, so the node re-run writes a fresh plan.
+    res = ps.clear_plan_artifacts_for_replace(str(job))
+    assert res["existed"] is True and res["prev"] == ps.PLAN_PREV_FILENAME
+
+    plan, _, _, count = _run(pack, monkeypatch, mode="with_still", job_name="replace me")
+    assert count == plan["subject_count"]
+    assert plan["inputs"]["unmatched_faces"] == "with_still"
+    prev = job / ps.PLAN_PREV_FILENAME
+    assert prev.is_file()
+    assert json.loads(prev.read_text(encoding="utf-8"))["inputs"]["unmatched_faces"] == "no_reference"
+
+
 def test_the_plan_node_plans_pairs_and_reports(pack, monkeypatch):
     """The shipped default is `leave`, so the middle face - detected on the clip, never found in
     the still - is not made a subject at all, and says so in the report."""

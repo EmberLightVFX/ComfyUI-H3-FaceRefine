@@ -10,18 +10,23 @@ Read-only is the whole design, and it is what keeps this safe:
 
 * nothing here detects, crops, pairs or re-decides anything. The panel cannot disagree with the
   graph, because it is the graph's own output;
-* nothing here writes, and there is no route that takes a pairing back in. Exclusions stay the
-  typed `excluded_faces` widget on the plan node: the front end can offer a per-face toggle that
-  sets that one widget - this module only reports, for each face, the widget token that switches
-  it off (`exclude_token`) - but the node re-decides on the next run, so the panel is never a
-  second source of truth. The interactive re-pairing editor is still a later ticket;
+* the panel never authors or re-decides a pairing. It can do two things to a job, and neither
+  makes it a source of truth: a per-face toggle edits only the plan node's own typed
+  ``excluded_faces`` widget (this module only reports each face's widget token, `exclude_token`),
+  and a "replace" action clears one job's stale PLAN artifacts so the plan node's OWN re-run can
+  overwrite them. It never writes a plan, a crop, a pairing or a pass stage - the plan node is the
+  only thing that decides and writes the pairing. See ``clear_plan_artifacts_for_replace``.
+  The interactive re-pairing editor is still a later ticket;
 * the images come back as ComfyUI's own ``/view`` URLs into the output folder. No new static
   file serving is invented here.
 
-One route, ``/h3_facerefine/pair_preview``, and one data function behind it, `preview_state`,
-which is importable and testable without a server - and which returns a state instead of raising
-when there is no plan, because "no plan yet for this job_name" is the normal state of a node
-nobody has queued and the panel has to say so rather than show a stack trace.
+Two routes share one namespace. ``/h3_facerefine/pair_preview`` (GET) is read-only and backed by
+one data function, `preview_state`, importable and testable without a server, which returns a
+state instead of raising when there is no plan, because "no plan yet for this job_name" is the
+normal state of a node nobody has queued. ``/h3_facerefine/pair_preview/replace`` (POST) is the
+only write action: for one job_name it clears that job's plan-node artifacts (plan.json to
+``plan_prev.json``, the preview, and the subject/clip crops) so the plan node can re-run into the
+same name and REPLACE the plan; it refuses while a render runs and never touches pass stages.
 
 The one busy rule the panel keeps is the picker's: while a prompt is executing, it refuses. The
 reason is not the cost of reading a JSON file - it is that a panel open over a half-written job
@@ -41,6 +46,10 @@ except ImportError:  # imported by name from the pack root, as the unit tests do
 # The route namespace the picker already uses; the panel gets its own path inside it, and the
 # picker's routes and script are untouched.
 PREVIEW_ROUTE = "/h3_facerefine/pair_preview"
+
+# The panel's one write action: clear a job's stale plan artifacts so the plan node can re-run
+# into the same job_name and replace the plan. Separate path so the read route stays read-only.
+REPLACE_ROUTE = PREVIEW_ROUTE + "/replace"
 
 # Same rule the face picker enforces, same reason: while the queue is running, refuse.
 BUSY_MESSAGE = (
@@ -324,3 +333,35 @@ def register():
             return web.json_response({"ok": False, "ready": False, "status": "error",
                                       "error": message, "message": message,
                                       "job_name": name, "read_only": True}, status=200)
+
+    @routes.post(REPLACE_ROUTE)
+    async def _replace_route(request):
+        """Clear one job's stale PLAN artifacts so a plan-node re-run can REPLACE the plan.
+
+        The panel's only write action, and a narrow one: it deletes only files the plan node itself
+        wrote (the plan, kept as plan_prev.json, plus the preview and subject/clip crops) so the
+        pairing-fingerprint guard has nothing to refuse on when the node re-runs into the same
+        job_name. It authors no pairing, and never touches pass stages (manifest.json, passes/) -
+        those nodes keep their own guards. Refuses while a render is running, like the read route.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        name = (body or {}).get("job_name", "")
+        if render_running():
+            message = BUSY_MESSAGE
+            return web.json_response({"ok": False, "status": "busy", "busy": True,
+                                      "error": message, "message": message, "job_name": name,
+                                      "replaced": False}, status=200)
+        try:
+            job = plan_store.job_dir_for(_output_root(), name)
+            res = plan_store.clear_plan_artifacts_for_replace(job)
+        except Exception as exc:            # empty/illegal job_name, or a folder we cannot reach
+            message = str(exc)
+            return web.json_response({"ok": False, "status": "error", "error": message,
+                                      "message": message, "job_name": name,
+                                      "replaced": False}, status=200)
+        return web.json_response({"ok": True, "status": "cleared", "job_name": name,
+                                  "replaced": res["existed"], "cleared": res["cleared"],
+                                  "prev": res["prev"], "job": job}, status=200)
