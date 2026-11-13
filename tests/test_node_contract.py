@@ -135,9 +135,9 @@ def test_the_subject_node_emits_the_released_pick_type_not_a_new_one():
     node = m.H3SubjectSelect
     assert m.H3FACEPICK == "H3FACEPICK"
     assert m.H3FACEPICK not in m.CUSTOM_TYPES     # only H3FACEPLAN is new
-    assert node.RETURN_TYPES == (m.H3FACEPICK, "IMAGE", "INT", "INT", "STRING")
+    assert node.RETURN_TYPES == (m.H3FACEPICK, "IMAGE", "INT", "INT", "INT", "STRING")
     assert node.RETURN_NAMES == ("face_pick", "subject_reference", "reference_exists",
-                                 "subject_index", "report")
+                                 "subject_index", "previous_subject", "report")
     assert len(node.RETURN_TYPES) == len(node.RETURN_NAMES)
     assert node.FUNCTION == "run"
     assert node.CATEGORY == m.CATEGORY
@@ -222,7 +222,11 @@ def test_the_pass_save_inputs_and_widgets_are_in_this_exact_order():
 def test_the_pass_load_inputs_and_widgets_are_in_this_exact_order():
     schema = m.H3PassLoad.INPUT_TYPES()
     assert list(schema["required"]) == ["plan"] + PASS_LOAD_ORDER
-    assert not schema.get("optional")
+    # no_previous is the single-chain fallback for the FIRST subject (previous_subject == -1):
+    # it is an optional IMAGE appended at the end, and `subject` may now be -1 to request it.
+    assert list(schema["optional"]) == ["no_previous"]
+    assert schema["optional"]["no_previous"][0] == "IMAGE"
+    assert schema["required"]["subject"][1]["min"] == ps.CHAINED_TO_CLIP == -1
     assert schema["required"]["plan"][0] == m.H3FACEPLAN
     assert schema["required"]["subject"][0] == "INT"
     assert list(schema["required"]["stream"][0]) == list(ps.PASS_STAGES)

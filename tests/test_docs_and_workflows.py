@@ -147,12 +147,23 @@ def test_each_example_workflow_parses_and_uses_known_nodes():
 
 
 def test_the_multi_face_example_wires_the_chain_the_readme_describes():
-    """The template demonstrates the pass model, so it has to contain the nodes that make it."""
+    """The single-chain template demonstrates the pass model with exactly ONE reusable pass
+    chain (any number of subjects, queued once per subject): one tracker, one stitch, one Subject
+    Select, and one H3 Pass Load that chains each pass onto the previous subject's stitched result
+    (its no_previous clip carries the first subject). No per-subject copies."""
     with open(EXAMPLE_DIR / "H3_Face_Refine_Multi_Face.json", encoding="utf-8") as handle:
         workflow = json.load(handle)
-    used = {node["type"] for node in workflow["nodes"]}
-    for node_type in NEW_NODES + ("H3FaceSelect", "H3FaceTrackCrop", "H3FaceStitch"):
+    types = [node["type"] for node in workflow["nodes"]]
+    used = set(types)
+    single_chain_nodes = ("H3MultiFacePlan", "H3SubjectSelect", "H3PassSave", "H3PassLoad",
+                          "H3MultiFaceComposite", "H3FaceSelect", "H3FaceTrackCrop", "H3FaceStitch")
+    for node_type in single_chain_nodes:
         assert node_type in used, node_type
+    # one reusable chain, not a copy per subject: one Subject Select, one tracker, one stitch.
+    assert types.count("H3SubjectSelect") == 1
+    assert types.count("H3FaceTrackCrop") == 1
+    assert types.count("H3FaceStitch") == 1
+    assert types.count("H3PassLoad") == 1
 
 
 def test_the_pack_version_has_a_whats_new_entry():
