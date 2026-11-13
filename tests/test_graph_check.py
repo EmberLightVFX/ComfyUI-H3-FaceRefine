@@ -227,18 +227,16 @@ def _unlink(workflow, node, socket_name):
 
 
 def test_pass_load_must_chain_onto_the_previous_subject_in_plan_order():
-    # The single-chain template's H3PassLoad#26 is driven by H3SubjectSelect (subject on 'next'), so
-    # its subject is not a number and the checker leaves it alone. This H3PassLoad chaining rule is
-    # pinned on a minimal graph instead: H3PassLoad feeds subject 1's stitch (base_images), and its
-    # own subject comes from an H3SubjectSelect. Selecting subject 5 (not subject 0) is a pass that
-    # does not build on the pass before it.
-    def graph(select_value):
+    # In the single-chain template the H3PassLoad subject comes from H3SubjectSelect's run-time
+    # walk, so it is not knowable statically and the checker leaves it alone. The chaining rule is
+    # pinned on a minimal graph where both subjects ARE static numbers: H3PassLoad feeds subject 1's
+    # stitch (base_images), so it must load subject 0 - anything else is a pass that did not build
+    # on the pass before it.
+    def graph(load_value):
         return {
             "nodes": [
-                {"id": 1, "type": "H3SubjectSelect", "mode": 0, "widgets_values": [select_value],
-                 "outputs": [{"name": "subject_index", "links": [11]}]},
-                {"id": 2, "type": "H3PassLoad", "mode": 0, "widgets_values": [0, "stitched"],
-                 "inputs": [{"name": "subject", "link": 11}, {"name": "plan"}, {"name": "images"}],
+                {"id": 2, "type": "H3PassLoad", "mode": 0, "widgets_values": [load_value, "stitched"],
+                 "inputs": [{"name": "plan"}, {"name": "images"}],
                  "outputs": [{"name": "images", "links": [12]}]},
                 {"id": 3, "type": "H3FaceStitch", "mode": 0,
                  "inputs": [{"name": "base_images", "link": 12}],
@@ -248,17 +246,16 @@ def test_pass_load_must_chain_onto_the_previous_subject_in_plan_order():
                  "outputs": [{"name": "images", "links": []}]},
             ],
             "links": [
-                [11, 1, 0, 2, 0, "INT"],
                 [12, 2, 0, 3, 0, "IMAGE"],
                 [13, 3, 0, 4, 0, "IMAGE"],
             ],
         }
 
-    problems = [p for p in gc.check_graph(graph("5")) if p.code == "PASS_CHAIN_ORDER"]
+    problems = [p for p in gc.check_graph(graph(5)) if p.code == "PASS_CHAIN_ORDER"]
     assert problems, "a pass that did not chain onto the previous subject was not caught"
     assert 2 in problems[0].node_ids
-    # subject 0 is the one subject 1 must build on, so the same graph selecting 0 is clean.
-    assert not [p for p in gc.check_graph(graph("0")) if p.code == "PASS_CHAIN_ORDER"]
+    # subject 0 is the one subject 1 must build on, so a graph loading 0 is clean.
+    assert not [p for p in gc.check_graph(graph(0)) if p.code == "PASS_CHAIN_ORDER"]
 
 
 def test_a_fixed_subject_pass_save_with_a_wrong_chained_from_is_caught():

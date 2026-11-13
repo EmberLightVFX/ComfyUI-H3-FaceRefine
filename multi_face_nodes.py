@@ -49,6 +49,60 @@ NEXT_SUBJECT = "next"
 # wired plan, so naming the subjects is the report's job (and a front end's, later).
 MAX_SUBJECT_CHOICES = 64
 
+# The Subject Select walk direction. The widget holds the subject VALUE (an int); the mode says
+# what happens to that value after each queue, and the report shows where it will land. The
+# walk position is remembered in the job folder (plan_store subject cursor), so queueing the same
+# graph again advances without editing the graph. Increment is the default: each queue walks to
+# the next subject, which is the old 'next' behaviour made visible as a number.
+SUBJECT_MODE_FIXED = "Fixed Value"
+SUBJECT_MODE_INCREMENT = "Increment Value"
+SUBJECT_MODE_DECREMENT = "Decrement Value"
+SUBJECT_MODE_DEFAULT = SUBJECT_MODE_INCREMENT
+SUBJECT_MODES = (SUBJECT_MODE_FIXED, SUBJECT_MODE_INCREMENT, SUBJECT_MODE_DECREMENT)
+SUBJECT_MODE_STEP = {SUBJECT_MODE_FIXED: 0, SUBJECT_MODE_INCREMENT: 1, SUBJECT_MODE_DECREMENT: -1}
+
+
+def checked_subject_mode(mode) -> str:
+    name = str(mode)
+    if name not in SUBJECT_MODES:
+        raise ValueError(
+            f"mode {mode!r} is not one of: {', '.join(SUBJECT_MODES)}")
+    return name
+
+
+def _subject_at_index(plan, index):
+    """The plan's subject dict with this index, or None (so the caller can name the choices)."""
+    for subject in (plan or {}).get("subjects") or []:
+        if int(subject["index"]) == int(index):
+            return subject
+    return None
+
+
+def _subject_walk_note(plan, job, current, mode, legacy):
+    """The 'where am I in the walk' line: the current subject, the mode, and where the next
+    queue will take it - so the user can see the ID they are on and what will happen next."""
+    total = len((plan or {}).get("subjects") or [])
+    done = plan_store.completed_subjects(plan, job) if job else []
+    if legacy:
+        return (f"subject {current} of {total} is up"
+                + (f"   already recorded complete: subject(s) {', '.join(str(i) for i in done)}"
+                   if done else "   no completed pass recorded in this job yet"))
+    order = plan_store.plan_subject_indices(plan)
+    lo, hi = (min(order), max(order)) if order else (0, 0)
+    nxt = current + SUBJECT_MODE_STEP[mode]
+    verb = {SUBJECT_MODE_FIXED: "stays on", SUBJECT_MODE_INCREMENT: "advances to",
+            SUBJECT_MODE_DECREMENT: "steps back to"}[mode]
+    tail = ""
+    if nxt > hi:
+        tail = f"  (past the last subject {hi}: the plan is fully walked)"
+    elif nxt < lo:
+        tail = f"  (before the first subject {lo})"
+    note = (f"you are on subject {current} of {total}   mode {mode}: after this queue the "
+            f"subject value {verb} {nxt}{tail}")
+    if done:
+        note += f"\n   recorded complete: subject(s) {', '.join(str(i) for i in done)}"
+    return note
+
 
 CATEGORY = "MiniMax H3/Face Refine"
 
@@ -1153,21 +1207,29 @@ class H3SubjectSelect:
                                "\n\nWire this into H3 Face Track + Crop's face_pick input too. "
                                "Do not resize, crop or trim between the loader and this node: "
                                "every box would land in the wrong place."}),
-                "subject": (["next"] + [str(i) for i in range(MAX_SUBJECT_CHOICES)], {
-                    "default": NEXT_SUBJECT,
-                    "tooltip": "Which subject this pass refines.\n\n"
-                               "next (default): the first subject in plan order with no "
-                               "completed pass recorded in the job folder. Queue the graph "
-                               "once per subject and change nothing in between - the "
-                               "bookkeeping lives in the job folder, and H3 Pass Save is what "
-                               "writes that record.\n\n"
-                               "a number: that subject, by the number H3 Multi-Face Plan "
-                               "prints in its report and on the pairing preview. Use it to "
-                               "pick a specific subject, or to re-run one.\n\n"
-                               "The list cannot show the plan's own names: ComfyUI asks for "
-                               "the options before anything is wired, so the plan is not "
-                               "readable yet. The report names every subject in the plan, and "
-                               "an answer that is not one of them lists them."}),
+                "subject": ("INT", {
+                    "default": 0, "min": 0, "max": MAX_SUBJECT_CHOICES - 1, "step": 1,
+                    "tooltip": "Which subject this pass refines, as a NUMBER - the number "
+                               "H3 Multi-Face Plan prints in its report and on the pairing "
+                               "preview.\n\n"
+                               "With the default mode (Increment Value) this is the subject you "
+                               "are on NOW: the walk position lives in the job folder, so "
+                               "queueing the same graph again advances through the plan without "
+                               "editing anything, and the report always shows this ID and what "
+                               "the next queue will use.\n\n"
+                               "Put a number here to JUMP straight to that subject (start the "
+                               "walk somewhere specific, or re-run one person)."}),
+                "mode": (list(SUBJECT_MODES), {
+                    "default": SUBJECT_MODE_DEFAULT,
+                    "tooltip": "What happens to the subject value AFTER each queue (the report "
+                               "shows where it lands):\n\n"
+                               "Increment Value (default): go to the next subject (value + 1). "
+                               "Queue once per subject and the whole plan is walked, top to "
+                               "bottom - this is the old 'next', made visible as a number.\n\n"
+                               "Decrement Value: go to the previous subject (value - 1) - walk "
+                               "backwards, e.g. to redo an earlier person.\n\n"
+                               "Fixed Value: hold this subject and run it again each queue "
+                               "(re-render one subject without moving)."}),
             },
         }
 
@@ -1177,25 +1239,47 @@ class H3SubjectSelect:
     FUNCTION = "run"
     CATEGORY = CATEGORY
 
-    def run(self, plan, face_pick, subject=NEXT_SUBJECT):
+    def run(self, plan, face_pick, subject=0, mode=SUBJECT_MODE_DEFAULT):
         if not isinstance(plan, dict) or "subjects" not in plan:
             raise ValueError(
                 "plan is not a subject plan - wire it from H3 Multi-Face Plan's plan output, "
                 "or read it out of the job folder's plan.json."
             )
+        mode = checked_subject_mode(mode)
 
         job = job_dir_for_plan(plan)
-        chosen = resolve_subject(plan, subject, job)
+
+        # Which subject to act on. A number (int or a digit string) is the walk: the position is
+        # remembered in the job folder, so queueing the same graph again advances it and `mode`
+        # says which way - and if the value itself changed since last time, that is an explicit
+        # jump. A legacy selector ('next', or a whole subject label) still resolves against the
+        # plan the old way, for graphs and callers that still pass one.
+        legacy = isinstance(subject, str) and not str(subject).lstrip("-").isdigit()
+        if legacy:
+            chosen = resolve_subject(plan, subject, job)
+            current = int(chosen["index"])
+        else:
+            seed = int(subject)
+            state = plan_store.read_subject_cursor(job) if job else None
+            if state is not None and state["seed"] == seed:
+                current = state["cursor"]                       # continue the stored walk
+            elif state is None and seed == 0 and job and plan_store.completed_subjects(plan, job):
+                resumed = plan_store.next_subject(plan, job)     # new walk: resume past done passes
+                current = int(resumed["index"]) if resumed is not None else seed
+            else:
+                current = seed                                  # a jump, or a brand-new job
+            chosen = _subject_at_index(plan, current)
+            if chosen is None:
+                raise ValueError(
+                    f"subject {current} is not one this plan holds. Its subjects are "
+                    f"{', '.join(str(int(s['index'])) for s in (plan.get('subjects') or []))}."
+                )
+            if job:   # remember the walk, and where the value lands after this run
+                plan_store.write_subject_cursor(job, current + SUBJECT_MODE_STEP[mode], seed)
+
         narrowed = narrow_pick_to_subject(plan, face_pick, chosen)
         reference, exists, reference_note = load_subject_reference(job, chosen)
-
-        cursor = ""
-        if str(NEXT_SUBJECT if subject is None else subject).strip() == NEXT_SUBJECT and job:
-            done = plan_store.completed_subjects(plan, job)
-            cursor = (f"subject {chosen['index']} of {len(plan['subjects'])} is up"
-                      + (f"   already recorded complete: subject(s) "
-                         f"{', '.join(str(i) for i in done)}" if done
-                         else "   no completed pass recorded in this job yet"))
+        cursor = _subject_walk_note(plan, job, current, mode, legacy)
 
         report = subject_report(plan, chosen, narrowed, job_dir=job,
                                reference_note=reference_note, cursor_note=cursor)

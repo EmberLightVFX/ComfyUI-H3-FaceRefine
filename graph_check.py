@@ -91,11 +91,19 @@ def _consumers(node, out_name, nodes, links):
 
 
 def _subject_number(node, nodes, links):
-    """The subject a pass node acts on. Its ``subject`` socket is wired from H3SubjectSelect,
-    so follow that link and read the select's own subject widget; fall back to this node's
-    own subject widget (position 0 on both Pass Save and Pass Load)."""
+    """The subject a pass node acts on, when it is a static number.
+
+    When the ``subject`` socket is wired from an **H3SubjectSelect**, the subject is resolved at
+    run time from the plan and the job folder (its `subject_index` / `previous_subject` outputs),
+    so it is NOT knowable statically - return None and let the checks skip it rather than reading
+    the select's seed widget as if it were the answer (a single reusable chain leaves a fixed seed
+    in the widget while the walk moves through the plan at run time). Only a pass node wired to a
+    plain number, or setting its own subject widget, gives a resolvable number here.
+    """
     src = _source_node(node, "subject", nodes, links)
     if src is not None:
+        if src.get("type") == "H3SubjectSelect":
+            return None
         widgets = src.get("widgets_values") or []
         if widgets:
             try:

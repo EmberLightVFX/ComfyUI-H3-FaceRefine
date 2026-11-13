@@ -399,3 +399,101 @@ def test_an_unknown_subject_names_the_choices():
         m.resolve_subject(plan, "who?", None)
     assert "next" in str(exc.value)
     assert m.subject_label(plan["subjects"][0]) in str(exc.value)
+
+
+# --- the subject walk: INT value + Fixed/Increment/Decrement, remembered in the job ----------
+#
+# run() resolves a NUMBER (not a selector) against a cursor stored in the job folder, so the
+# same graph queueing again advances the subject value and the report shows where it lands. These
+# pin that bookkeeping without a torch/pick harness: narrow + reference are stubbed, and the
+# output root is redirected into tmp_path so nothing ever writes to a real ComfyUI output folder.
+
+def _walk_plan(job_name="walk job"):
+    return {"version": ps.PLAN_VERSION, "match_frame": 0,
+            "subjects": [{"index": 0}, {"index": 1}, {"index": 2}],
+            "run": {"job_name": job_name}}
+
+
+def _walk_select(monkeypatch, tmp_path):
+    """H3SubjectSelect with the pick-specific machinery stubbed out: only the subject WALK (the
+    INT value, the mode, the job cursor and the walk note) is under test here, so narrowing, the
+    reference load and the full report builder are replaced with no-ops, and the output root is
+    redirected into tmp_path so nothing ever writes to a real ComfyUI output folder."""
+    monkeypatch.setattr(m, "_output_root", lambda: str(tmp_path / "output"))
+    monkeypatch.setattr(m, "narrow_pick_to_subject",
+                        lambda plan, face_pick, chosen: face_pick)
+    monkeypatch.setattr(m, "load_subject_reference",
+                        lambda job, chosen: (None, 0, ""))
+    # Keep the walk note: the real report builder folds cursor_note into the report, so the stub
+    # returns it and the report assertions below still see where the value lands.
+    monkeypatch.setattr(m, "subject_report",
+                        lambda *a, **k: k.get("cursor_note", ""))
+    return m.H3SubjectSelect()
+
+
+def _job(tmp_path, job_name="walk job"):
+    return ps.job_dir_for(str(tmp_path / "output"), job_name)
+
+
+def test_increment_walk_advances_the_subject_value_each_queue(monkeypatch, tmp_path):
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+
+    # subject_index is return slot 3, previous_subject slot 4 (the chain feed).
+    runs = [node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT) for _ in range(3)]
+    assert [r[3] for r in runs] == [0, 1, 2]
+    assert [r[4] for r in runs] == [-1, 0, 1]                 # each builds on the one before it
+    assert ps.read_subject_cursor(_job(tmp_path))["cursor"] == 3   # one past the last subject
+
+
+def test_the_report_shows_where_the_value_lands_each_queue(monkeypatch, tmp_path):
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+
+    first = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[5]
+    assert "you are on subject 0 of 3" in first
+    assert "after this queue the subject value advances to 1" in first
+    second = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[5]
+    assert "you are on subject 1 of 3" in second
+    assert "advances to 2" in second
+    last = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[5]
+    assert "advances to 3" in last and "past the last subject 2" in last
+
+
+def test_fixed_value_holds_one_subject_across_queues(monkeypatch, tmp_path):
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+
+    seen = [node.run(plan, "PICK", 1, m.SUBJECT_MODE_FIXED)[3] for _ in range(3)]
+    assert seen == [1, 1, 1]
+    assert ps.read_subject_cursor(_job(tmp_path))["cursor"] == 1
+
+
+def test_decrement_value_walks_backwards(monkeypatch, tmp_path):
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+
+    seen = [node.run(plan, "PICK", 2, m.SUBJECT_MODE_DECREMENT)[3] for _ in range(2)]
+    assert seen == [2, 1]
+    report = node.run(plan, "PICK", 2, m.SUBJECT_MODE_DECREMENT)[5]
+    assert "steps back to" in report
+
+
+def test_a_different_number_jumps_to_that_subject(monkeypatch, tmp_path):
+    """Changing the widget value itself (not re-queueing the same value) is an explicit jump, not
+    a continuation of the stored walk."""
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+    node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)          # walk now at cursor 1, seed 0
+    jumped = node.run(plan, "PICK", 2, m.SUBJECT_MODE_INCREMENT)[3]
+    assert jumped == 2                                            # jumped, did not resume at 1
+
+
+def test_a_number_the_plan_does_not_hold_is_refused(monkeypatch, tmp_path):
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+    with pytest.raises(ValueError) as exc:
+        node.run(plan, "PICK", 7, m.SUBJECT_MODE_INCREMENT)
+    assert "subject 7 is not one this plan holds" in str(exc.value)
+    assert "0, 1, 2" in str(exc.value)
+
