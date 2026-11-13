@@ -143,6 +143,9 @@ def _empty_state(job_name) -> dict:
         "inputs": {}, "counts": {},
         "run": {},
         "clip_faces": [], "still_faces": [], "pair_overrides": [],
+        # Re-running the plan node reuses the saved plan; the panel surfaces the last run's reuse
+        # record and any settings it did NOT apply (defaults: not reused, nothing pending).
+        "reused": False, "unapplied": [],
         "preview_file": plan_store.PREVIEW_FILENAME,
         "preview_exists": False, "preview_url": None,
     }
@@ -343,6 +346,14 @@ def preview_state(job_name) -> dict:
         "target_size": inputs.get("target_size"),
         "still_size": inputs.get("still_size"),
     }
+
+    # The last plan-node run's reuse record (#re-running the plan node reuses the saved plan).
+    # If the node reused this job's plan instead of re-planning, name it and list any settings the
+    # node now sets differently that the run did NOT apply - so the panel can tell the user to
+    # press Process Plan to apply them. Empty when the last run actually wrote a fresh plan.
+    resume = plan_store.read_resume_state(job)
+    state["reused"] = bool(resume.get("reused"))
+    state["unapplied"] = [str(line) for line in (resume.get("changed") or [])]
 
     preview = os.path.join(job, plan_store.PREVIEW_FILENAME)
     state["preview_exists"] = os.path.isfile(preview)

@@ -598,58 +598,85 @@ class H3MultiFacePlan:
                                        or None)}
         plan["still_note"] = ("the first image of an N-image reference_still batch"
                               if int(reference_still.shape[0]) > 1 else "")
+        # Kept so a reused (stored) plan still reports the detector/frame this run measured with.
+        run_record = plan["run"]
+        still_note = plan["still_note"]
+        # Per-run bookkeeping for the pairing panel: reset first, mark_resumed sets it only if the
+        # saved plan is reused below. A first plan (no folder) leaves it cleared, so the panel knows.
+        plan_store.clear_resumed_flag(job)
         if os.path.isfile(plan_store.plan_path(job)):
-            # A job folder is one pairing's. The subject references and every pass inside it
-            # were cut from the inputs that made this plan, so overwriting it after a widget
-            # changed would leave a folder holding two pairings' work - and the stitch node
-            # would happily composite them into one clip. Same inputs is a resume, and has to
-            # stay possible or no job could ever be re-run.
+            # The plan node only decides a pairing when there is nothing to reuse. A job folder
+            # already holds one pairing's plan, references and passes, so re-running the flow here
+            # REUSES that saved plan rather than re-cutting it: every output stays consistent with
+            # the passes already in the folder, and re-running is never destructive. To write a new
+            # plan into this name the user presses the pairing panel's Process Plan (which clears
+            # the folder's plan artifacts first) or picks a new job_name. If the node's widgets now
+            # differ from how the job was planned, that change is deliberately NOT applied to this
+            # run - applying it would orphan the existing passes - so the report says so and names
+            # what differs, instead of raising the pass nodes' refusal.
             stored = plan_store.read_plan(job)
-            plan_store.check_pairing_inputs(
-                stored, plan, job,
-                f"Set job_name to a new name for this pairing, or delete/rename {job} if you "
-                f"mean to re-plan this one from scratch: the subject references and every "
-                f"pass saved in it were cut from the inputs above.")
+            changed = plan_store.changed_widget_lines(stored, plan)
+            plan = stored
+            plan["run"] = run_record
+            plan["still_note"] = still_note
+            plan_store.mark_resumed(job, changed)
             old_plan = plan_store.plan_version_note(stored)
             if old_plan:
                 # Read, not migrated: the folder is only stale if the fingerprint says so.
                 notes.append(old_plan)
-        os.makedirs(job, exist_ok=True)
-
-        # The crops are cut and written BEFORE the plan is written, so the plan records the
-        # file each subject's reference lives in. That is what lets a later pass resume a job
-        # with neither plate loaded again.
-        refs = 0
-        for subject in plan["subjects"]:
-            # A `crop` reference is a cut of the still and a `still` reference (#8,
-            # unmatched_faces=with_still) is all of it; either way it goes out through the same
-            # writer, under the same subject_N.png name, so a later pass reads the two the same
-            # way and never loads the still again.
-            if subject["ref_crop"]:
-                file_name = f"subject_{int(subject['index'])}.png"
-                _write_reference_png(os.path.join(job, file_name), still,
-                                     subject["ref_crop"])
-                subject["ref_file"] = file_name
-                refs += 1
-        # Also cut each subject's face out of the match-frame clip, so the pairing panel can
-        # show the clip face beside the reference (#9). Only a subject with a clip face on the
-        # match frame gets one; a still-only subject has no clip_box, so the panel shows a
-        # placeholder for it instead.
-        clip_W, clip_H = int(images[frame].shape[1]), int(images[frame].shape[0])
-        for subject in plan["subjects"]:
-            box = subject.get("clip_box")
-            if box:
-                rect = _clip_crop_rect(box, clip_W, clip_H)
-                if rect is not None:
-                    clip_name = f"clip_{int(subject['index'])}.png"
-                    _write_reference_png(os.path.join(job, clip_name), images[frame], rect)
-                    subject["clip_file"] = clip_name
-        # #9: the pairing preview is written here too, before the plan is, so a folder that has
-        # a plan also has everything the plan says it wrote. The panel reads this file rather
-        # than drawing anything, which is what lets it stay read-only.
-        preview = _pairing_preview(images[frame], still, clip_boxes, still_boxes, plan)
-        _write_preview_png(os.path.join(job, plan_store.PREVIEW_FILENAME), preview)
-        written = plan_store.write_plan(job, plan)
+            notes.append(
+                f"reused the saved plan in {name} without re-cutting it: H3 Multi-Face Plan only "
+                f"plans when there is no job yet, or after the pairing panel's Process Plan clears "
+                f"this folder. The references and passes already in it are unchanged.")
+            if changed:
+                notes.append(
+                    "NOTICE - your settings on this node differ from the plan already saved here, "
+                    "so THIS run did NOT apply them (it reused the saved subject set so the "
+                    "existing passes stay valid). To apply them, press the pairing panel's "
+                    "Process Plan button (it replaces the plan - the job's passes must then be "
+                    "re-run) or set a new job_name. What differs:")
+                notes.extend("  - " + line for line in changed)
+            refs = sum(1 for subject in plan["subjects"] if subject.get("ref_file"))
+            written = plan_store.plan_path(job)
+            # The preview output socket still has to carry an image, so redraw it from the saved
+            # plan over the freshly loaded plates (drawing only - the file on disk is untouched).
+            preview = _pairing_preview(images[frame], still, clip_boxes, still_boxes, plan)
+        else:
+            os.makedirs(job, exist_ok=True)
+            # The crops are cut and written BEFORE the plan is written, so the plan records the
+            # file each subject's reference lives in. That is what lets a later pass resume a job
+            # with neither plate loaded again.
+            refs = 0
+            for subject in plan["subjects"]:
+                # A `crop` reference is a cut of the still and a `still` reference (#8,
+                # unmatched_faces=with_still) is all of it; either way it goes out through the same
+                # writer, under the same subject_N.png name, so a later pass reads the two the same
+                # way and never loads the still again.
+                if subject["ref_crop"]:
+                    file_name = f"subject_{int(subject['index'])}.png"
+                    _write_reference_png(os.path.join(job, file_name), still,
+                                         subject["ref_crop"])
+                    subject["ref_file"] = file_name
+                    refs += 1
+            # Also cut each subject's face out of the match-frame clip, so the pairing panel can
+            # show the clip face beside the reference (#9). Only a subject with a clip face on the
+            # match frame gets one; a still-only subject has no clip_box, so the panel shows a
+            # placeholder for it instead.
+            clip_W, clip_H = int(images[frame].shape[1]), int(images[frame].shape[0])
+            for subject in plan["subjects"]:
+                box = subject.get("clip_box")
+                if box:
+                    rect = _clip_crop_rect(box, clip_W, clip_H)
+                    if rect is not None:
+                        clip_name = f"clip_{int(subject['index'])}.png"
+                        _write_reference_png(os.path.join(job, clip_name), images[frame], rect)
+                        subject["clip_file"] = clip_name
+            # #9: the pairing preview is written here too, before the plan is, so a folder that has
+            # a plan also has everything the plan says it wrote. The panel reads this file rather
+            # than drawing anything, which is what lets it stay read-only.
+            preview = _pairing_preview(images[frame], still, clip_boxes, still_boxes, plan)
+            _write_preview_png(os.path.join(job, plan_store.PREVIEW_FILENAME), preview)
+            written = plan_store.write_plan(job, plan)
 
         # #8: what the plan decided about faces that found no partner, in the plan module's own
         # words - `leave` names every face it left out and says that leaving is not a failure.

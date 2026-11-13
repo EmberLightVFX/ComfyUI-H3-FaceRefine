@@ -129,10 +129,10 @@ def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
 
 
 def test_process_plan_replaces_the_plan_after_clearing_stale_artifacts(pack, monkeypatch, tmp_path):
-    """What the panel's Process Plan button does end to end: the fingerprint guard refuses a changed
-    pairing into an existing folder, but clearing the plan node's OWN artifacts first (the replace
-    route) lets the same run REPLACE the plan in that job_name. The previous plan survives as
-    plan_prev.json, so the replacement is recoverable."""
+    """Re-running the plan node into an existing job REUSES the saved plan - it never re-cuts, even
+    when a widget changed - so a changed pairing cannot mix into the folder. To write a fresh plan
+    the pairing panel's Process Plan first clears the plan node's OWN artifacts (previous plan kept
+    as plan_prev.json); the same node re-run then plans afresh into that job_name."""
     import plan_store as ps
 
     _run(pack, monkeypatch, mode="no_reference", job_name="replace me")
@@ -140,10 +140,15 @@ def test_process_plan_replaces_the_plan_after_clearing_stale_artifacts(pack, mon
     assert json.loads((job / ps.PLAN_FILENAME).read_text(encoding="utf-8"))[
         "inputs"]["unmatched_faces"] == "no_reference"
 
-    # A bare queue with a changed pairing still refuses: the guard is intact for normal runs.
-    with pytest.raises(ValueError) as exc:
-        _run(pack, monkeypatch, mode="with_still", job_name="replace me")
-    assert "unmatched_faces" in str(exc.value)
+    # A bare re-run with a changed pairing reuses the saved plan and warns: it neither raises nor
+    # overwrites, so the saved subject set (and the passes cut from it) stay valid.
+    reused, _, report, _ = _run(pack, monkeypatch, mode="with_still", job_name="replace me")
+    assert reused["inputs"]["unmatched_faces"] == "no_reference"        # the saved plan, not this run
+    assert "reused the saved plan" in report
+    assert "NOTICE" in report and "unmatched_faces" in report
+    assert ps.plan_is_resumed(str(job))
+    assert json.loads((job / ps.PLAN_FILENAME).read_text(encoding="utf-8"))[
+        "inputs"]["unmatched_faces"] == "no_reference"                  # plan.json left untouched
 
     # Process Plan clears the plan node's artifacts first, so the node re-run writes a fresh plan.
     res = ps.clear_plan_artifacts_for_replace(str(job))
@@ -151,7 +156,8 @@ def test_process_plan_replaces_the_plan_after_clearing_stale_artifacts(pack, mon
 
     plan, _, _, count = _run(pack, monkeypatch, mode="with_still", job_name="replace me")
     assert count == plan["subject_count"]
-    assert plan["inputs"]["unmatched_faces"] == "with_still"
+    assert plan["inputs"]["unmatched_faces"] == "with_still"           # freshly planned now
+    assert not ps.plan_is_resumed(str(job))                            # a real plan, not a reuse
     prev = job / ps.PLAN_PREV_FILENAME
     assert prev.is_file()
     assert json.loads(prev.read_text(encoding="utf-8"))["inputs"]["unmatched_faces"] == "no_reference"
@@ -284,18 +290,19 @@ def test_the_untouched_default_writes_todays_bytes(pack, monkeypatch, tmp_path):
     assert written["subjects"][0]["ref_crop"] == [0, 20, 600, 600]
 
 
-def test_a_different_still_into_the_same_job_folder_refuses_naming_the_boxes(pack, monkeypatch):
-    """Spec story 26: two pairings never share one clip. The same job_name with a different
-    still - same subject indices, same widgets, only the measurements moved - is refused, and
-    the refusal names the evidence rather than shrugging."""
-    _run(pack, monkeypatch)                                    # first plan, into "group shot"
+def test_a_different_still_into_the_same_job_folder_reuses_the_saved_plan(pack, monkeypatch):
+    """Spec story 26, restated for a reuse plan node: two pairings never share one clip. Re-running
+    the same job_name with a different still reuses the saved plan (the first still's pairing) and
+    never re-cuts, so the folder still holds exactly one pairing - the new still is not applied."""
+    first, _, _, _ = _run(pack, monkeypatch)                    # first plan, into "group shot"
 
-    with pytest.raises(ValueError) as exc:
-        _run(pack, monkeypatch, still_boxes=[[210, 210, 410, 450], [1600, 240, 1800, 480]])
-    message = str(exc.value)
-    assert "still_boxes" in message
-    assert "first difference at face 0" in message
-    assert "mix two pairings" in message
+    reused, _, report, _ = _run(
+        pack, monkeypatch, still_boxes=[[210, 210, 410, 450], [1600, 240, 1800, 480]])
+
+    # The saved pairing is what comes back - the different still was never written over it.
+    assert [(s["clip_face"], s["still_face"]) for s in reused["subjects"]] == \
+           [(s["clip_face"], s["still_face"]) for s in first["subjects"]]
+    assert "reused the saved plan" in report
 
 
 def test_excluded_faces_come_off_the_subjects_and_into_the_report(pack, monkeypatch):
@@ -387,16 +394,17 @@ def test_leave_with_nobody_paired_refuses_and_names_the_widget_that_fixes_it(pac
     assert "no_reference" in text and "with_still" in text
 
 
-def test_changing_the_mode_against_an_existing_job_folder_refuses(pack, monkeypatch):
-    """Same plates, same faces, same everything but the mode - and the mode decided who the
-    subjects are, so the passes already in that folder are a different job's."""
+def test_changing_the_mode_against_an_existing_job_folder_reuses_and_warns(pack, monkeypatch):
+    """Same plates, same faces, same everything but the mode. Rather than orphan the passes already
+    in that folder, the plan node reuses the saved plan and says the mode change was NOT applied,
+    pointing at Process Plan to apply it."""
     _run(pack, monkeypatch, mode="no_reference", job_name="mode switch")
-    with pytest.raises(ValueError) as exc:
-        _run(pack, monkeypatch, mode="with_still", job_name="mode switch")
+    plan, _, report, _ = _run(pack, monkeypatch, mode="with_still", job_name="mode switch")
 
-    text = str(exc.value)
-    assert "unmatched_faces" in text
-    assert "no_reference" in text and "with_still" in text
+    assert plan["inputs"]["unmatched_faces"] == "no_reference"   # the saved plan, reused
+    assert "reused the saved plan" in report
+    assert "NOTICE" in report
+    assert "unmatched_faces" in report and "no_reference" in report and "with_still" in report
 
 
 def test_the_reference_reader_hands_back_the_whole_still_for_a_whole_still_subject(pack,

@@ -2010,6 +2010,84 @@ def check_pairing_inputs(stored_plan, current_plan, job_dir, advice: str) -> Non
 
 
 # ----------------------------------------------------------------------------
+# re-running the plan node: reuse the saved plan instead of re-planning
+# ----------------------------------------------------------------------------
+#
+# The plan node only DECIDES a pairing when there is nothing to reuse: a first run, or a folder
+# the pairing panel's Process Plan just cleared. When a job folder already holds a plan, running
+# the flow again reuses that saved plan so every output stays consistent with the references and
+# passes already in the folder. If the node's widgets have changed since the job was planned, the
+# change is NOT applied to a reused run - that would orphan the existing passes - but the run says
+# so loudly and names what differs, so the user knows to press Process Plan (or pick a new
+# job_name) to apply it. This flag is per-run bookkeeping for the pairing panel; it is written at
+# the start of a run and never read as pairing input.
+
+RESUME_FILENAME = ".plan_resumed"
+
+
+def _resume_flag_path(job_dir) -> str:
+    return os.path.join(str(job_dir), RESUME_FILENAME)
+
+
+def mark_resumed(job_dir, changed=None) -> None:
+    """Record that the most recent plan-node run reused this job's saved plan.
+
+    ``changed`` is the list of widget lines the run did NOT apply; it is stored so the pairing
+    panel can name them after the fact (the run's report is only on the node).
+    """
+    path = _resume_flag_path(job_dir)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump({"reused": True, "changed": list(changed or [])}, handle)
+
+
+def read_resume_state(job_dir) -> dict:
+    """The last run's reuse record for a job, or ``{}`` if there is none."""
+    path = _resume_flag_path(job_dir)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def clear_resumed_flag(job_dir) -> None:
+    path = _resume_flag_path(job_dir)
+    if os.path.isfile(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def plan_is_resumed(job_dir) -> bool:
+    """True right after a plan-node run that reused the saved plan rather than re-planning it."""
+    return bool(read_resume_state(job_dir).get("reused"))
+
+
+def changed_widget_lines(stored_plan, current_plan) -> list[str]:
+    """One short line per plan-deciding WIDGET the graph now sets differently from the saved plan.
+
+    This is the reuse-run's warning, not the pass nodes' refusal: it names only the widget inputs
+    a person edits (not the measured boxes), and counts the subject sets rather than dumping every
+    subject, so it reads as "here is what you changed that this run did not apply".
+    """
+    before = pairing_fingerprint(stored_plan)
+    after = pairing_fingerprint(current_plan)
+    out = []
+    for field in PAIRING_INPUT_FIELDS:
+        if before[field] != after[field]:
+            out.append(f"{field}: the node now has {_describe(after[field])}, the saved plan "
+                       f"used {_describe(before[field])}")
+    if before["subjects"] != after["subjects"]:
+        out.append(f"subject set: the saved plan has {len(before['subjects'])} subject(s), these "
+                   f"settings would make {len(after['subjects'])}")
+    return out
+
+
+# ----------------------------------------------------------------------------
 # one subject's shot account: real absence, and the tracker losing them (#6)
 # ----------------------------------------------------------------------------
 #

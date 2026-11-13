@@ -81,6 +81,42 @@ def test_clear_plan_artifacts_reports_a_missing_job_folder(tmp_path):
         "existed": False, "cleared": [], "prev": None}
 
 
+# --- re-running the plan node: the reuse flag and the unapplied-change summary ----------------
+
+def _two_plans(excluded=()):
+    clip = [[100, 100, 200, 220], [400, 120, 520, 260]]
+    return ps.build_subject_plan(clip, [0.9, 0.9], clip, [0.9, 0.9],
+                                 (1000, 1000), (1000, 1000), excluded=excluded)
+
+
+def test_resume_flag_round_trips_and_names_unapplied_changes(tmp_path):
+    job = os.path.join(str(tmp_path), "job")
+    os.makedirs(job)
+    assert ps.read_resume_state(job) == {} and ps.plan_is_resumed(job) is False
+
+    ps.mark_resumed(job, ["excluded_faces: the node now has [3], the saved plan used []"])
+    assert ps.plan_is_resumed(job) is True
+    state = ps.read_resume_state(job)
+    assert state["reused"] is True and len(state["changed"]) == 1
+    assert "excluded_faces" in state["changed"][0]
+
+    ps.clear_resumed_flag(job)
+    assert ps.read_resume_state(job) == {} and ps.plan_is_resumed(job) is False
+
+
+def test_changed_widget_lines_names_only_widget_inputs_a_run_did_not_apply():
+    saved = _two_plans()
+    now = _two_plans(excluded=(0,))
+    lines = ps.changed_widget_lines(saved, now)
+    assert any("excluded_faces" in line for line in lines)
+    # The saved plan's subject set had 2, the new exclusions would make fewer - said as a count.
+    assert any("subject set" in line for line in lines)
+
+
+def test_changed_widget_lines_is_empty_when_the_run_matches_the_saved_plan():
+    assert ps.changed_widget_lines(_two_plans(), _two_plans()) == []
+
+
 def test_identical_plates_pair_by_position():
     """Two plates framed identically: each face finds the face in the same place."""
     clip = [[100, 100, 200, 220], [400, 120, 520, 260]]

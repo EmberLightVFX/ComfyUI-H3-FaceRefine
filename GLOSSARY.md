@@ -42,7 +42,7 @@ The job folder's `manifest.json`: which subjects have which pass stages on disk,
 _Avoid_: todo list, state file, progress file
 
 **Pairing fingerprint**:
-The inputs and the evidence that decide a job's pairing — both plate sizes, the match frame, `subject_source`, the match tolerance, the exclusions, the manual `pair_overrides`, `unmatched_faces`, `max_subjects`, the `crop_factor` the subject references were cut at, the boxes both plates measured at the match frame with their scale, the detector and confidence that produced them, and the subject set itself — compared before any pass reads or writes a job folder, so two pairings never mix into one clip.
+The inputs and the evidence that decide a job's pairing — both plate sizes, the match frame, `subject_source`, the match tolerance, the exclusions, the manual `pair_overrides`, `unmatched_faces`, `max_subjects`, the `crop_factor` the subject references were cut at, the boxes both plates measured at the match frame with their scale, the detector and confidence that produced them, and the subject set itself — compared before any pass reads or writes a job folder, so two pairings never mix into one clip. The **pass nodes** refuse when it differs from the stored `plan.json`; **H3 Multi-Face Plan** instead reuses the stored plan on a re-run and warns that any differing input was not applied (see **Process Plan**).
 _Avoid_: hash, checksum, signature
 
 **Composite order**:
