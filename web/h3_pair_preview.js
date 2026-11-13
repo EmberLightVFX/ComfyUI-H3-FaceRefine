@@ -368,16 +368,16 @@ function render(d, data, node, name) {
     if (data.reused) {
         const banner = el("p", "h3pp-note h3pp-reused",
             "This job's plan was REUSED on the last H3 Multi-Face Plan run - the node only plans "
-            "when there is no saved plan yet, or after Process Plan clears this folder, so running "
-            "the flow again never re-cuts or overwrites it.");
+            + "when there is no saved plan yet, or after Process Plan clears this folder, so running "
+            + "the flow again never re-cuts or overwrites it.");
         d.body.appendChild(banner);
         const pending = data.unapplied || [];
         if (pending.length) {
             d.body.appendChild(el("p", "h3pp-note h3pp-warn",
                 "Your node settings differ from the saved plan, so they were NOT applied to that "
-                "run (it reused the saved subject set to keep the existing passes valid). Press "
-                "Process Plan to apply them (the passes must then be re-run), or use a new "
-                "job_name. What differs:"));
+                + "run (it reused the saved subject set to keep the existing passes valid). Press "
+                + "Process Plan to apply them (the passes must then be re-run), or use a new "
+                + "job_name. What differs:"));
             for (const line of pending) d.body.appendChild(el("p", "h3pp-sub h3pp-warn", line));
         }
     }
