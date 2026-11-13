@@ -91,6 +91,10 @@ def test_the_state_points_at_comfyui_s_own_view_route_for_the_images(pack, monke
     refs = [s["ref_url"] for s in state["subjects"]]
     assert all(u.startswith("/view?") and "type=output" in u for u in refs)
     assert "subject_0.png" in refs[0]
+    # The clip face beside each reference (#9): a /view URL into the clip crop the node wrote.
+    clips = [s["clip_url"] for s in state["subjects"]]
+    assert all(u and u.startswith("/view?") and "subfolder=" in u for u in clips)
+    assert "clip_0.png" in clips[0] and "clip_1.png" in clips[1]
     assert state["preview_exists"] is True
 
 

@@ -48,6 +48,9 @@ function styleOnce() {
         ".h3pp-cell{flex:1;font:12px sans-serif;color:#ccc}",
         ".h3pp-cell b{color:#eee}",
         ".h3pp-cell small{display:block;color:#8f8f8f;margin-top:4px}",
+        ".h3pp-crops{display:flex;gap:10px;align-items:flex-start}",
+        ".h3pp-thumb{display:flex;flex-direction:column;gap:3px;align-items:center}",
+        ".h3pp-cap{font:11px sans-serif;color:#8f8f8f;text-align:center;max-width:132px}",
         ".h3pp-crop{width:132px;max-height:132px;object-fit:contain;background:#111;",
         "  border:1px solid #555;border-radius:4px}",
         ".h3pp-nocrop{width:132px;height:80px;border:1px dashed #555;border-radius:4px;color:#888;",
@@ -134,21 +137,31 @@ function showWait(d, node) {
 
 /* ------------------------------------------------------------------ render */
 
-function cropCell(s) {
-    const cell = el("div");
-    if (s.ref_url) {
+function thumb(url, cap, missing) {
+    const col = el("div", "h3pp-thumb");
+    if (url) {
         const img = el("img", "h3pp-crop");
-        img.src = api.apiURL(s.ref_url);
-        img.alt = s.label || ("subject " + s.index);
-        cell.appendChild(img);
-        cell.appendChild(el("small", "h3pp-cell", s.ref_file));
-        return cell;
+        img.src = api.apiURL(url);
+        img.alt = cap;
+        col.appendChild(img);
+    } else {
+        col.appendChild(el("div", "h3pp-nocrop", missing));
     }
+    col.appendChild(el("small", "h3pp-cap", cap));
+    return col;
+}
+
+function cropCell(s) {
+    // Both faces of the subject side by side: the clip face on the match frame, and the
+    // reference it is conditioned on. A still-only subject has no clip face, so it shows the
+    // placeholder instead of an image.
+    const wrap = el("div", "h3pp-crops");
+    wrap.appendChild(thumb(s.clip_url, "clip face", "no clip face\non the match frame"));
     const why = !s.has_reference
         ? "no subject reference\n(unmatched_faces=no_reference)"
-        : "subject reference file missing\nre-run H3 Multi-Face Plan";
-    cell.appendChild(el("div", "h3pp-nocrop", why));
-    return cell;
+        : "reference file missing\nre-run H3 Multi-Face Plan";
+    wrap.appendChild(thumb(s.ref_url, s.ref_file || "reference", why));
+    return wrap;
 }
 
 function kindNote(s) {
@@ -170,12 +183,12 @@ function chips(list, cls, text) {
     return wrap;
 }
 
-function render(d, data, node) {
+function render(d, data, node, name) {
     d.body.innerHTML = "";
     d.foot.innerHTML = "";
     d.foot.appendChild(el("span", "h3pp-msg",
         "read-only - nothing here writes to the graph or to disk"));
-    const refresh = button("Refresh", "", () => { d.close(); openPanel(node); });
+    const refresh = button("Refresh", "", () => { d.close(); openPanel(node, name); });
 
     if (!data.ready) {
         d.head.textContent = "Pairing preview - " + (data.job_name || "(no job_name)")
@@ -265,7 +278,7 @@ function render(d, data, node) {
 
 /* ------------------------------------------------------------------- open */
 
-async function openPanel(node) {
+async function openPanel(node, nameOverride) {
     // Refuse before anything is read, then again on the answer: the route is the one that can
     // actually see the queue, so its refusal is the authority and this one is only faster.
     if (renderRunning()) {
@@ -273,8 +286,13 @@ async function openPanel(node) {
         showWait(d, node);
         return;
     }
-    const wd = w(node, "job_name");
-    const name = wd ? String(wd.value === null || wd.value === undefined ? "" : wd.value) : "";
+    let name;
+    if (nameOverride !== undefined && nameOverride !== null) {
+        name = String(nameOverride);
+    } else {
+        const wd = w(node, "job_name");
+        name = wd ? String(wd.value === null || wd.value === undefined ? "" : wd.value) : "";
+    }
     const d = dialog("Pairing preview - " + (name || "(no job_name)"));
     d.msg.textContent = "reading the job folder...";
 
@@ -291,7 +309,123 @@ async function openPanel(node) {
     }
     if (data && data.busy) { showWait(d, node); return; }
     d.msg.textContent = "";
-    render(d, data || { ready: false, message: "The pairing route returned nothing." }, node);
+    render(d, data || { ready: false, message: "The pairing route returned nothing." }, node, name);
+}
+
+/* ------------------------------------------------------- scratch re-plan (B) */
+
+// A throwaway job folder so a settings change can be previewed without tripping the pairing
+// fingerprint guard on the real job. It runs the REAL plan node (so detection, pairing, the
+// preview and the crops are exactly what the node would produce) but writes into a scratch name
+// and never touches the job you would queue. Unique per click, so two re-plans with different
+// settings never collide on one scratch folder.
+function scratchName(base) {
+    const clean = (base || "").trim() || "h3job";
+    return clean + "__preview_" + Date.now().toString(36);
+}
+
+// The plan node is an output node, so a prompt of just it plus the nodes that FEED it runs it
+// and stops there - no tracker, sampler or render. Walk the plan's link inputs upstream.
+function ancestorSubgraph(prompt, rootId) {
+    const keep = new Set();
+    const stack = [String(rootId)];
+    while (stack.length) {
+        const id = stack.pop();
+        if (keep.has(id) || !prompt[id]) continue;
+        keep.add(id);
+        for (const value of Object.values(prompt[id].inputs || {})) {
+            if (Array.isArray(value)) stack.push(String(value[0]));
+        }
+    }
+    const sub = {};
+    for (const id of keep) sub[id] = prompt[id];
+    return sub;
+}
+
+async function waitForPrompt(promptId, d) {
+    const t0 = Date.now();
+    for (;;) {
+        await new Promise((res) => setTimeout(res, 500));
+        let hist;
+        try { hist = await api.fetch("/history/" + promptId); } catch (e) { hist = null; }
+        const entry = hist && hist[promptId];
+        const status = entry && entry.status;
+        if (status && status.status_str === "error") {
+            const msgs = (entry.messages || [])
+                .map((m) => (Array.isArray(m) && m[1] ? JSON.stringify(m[1]) : "")).filter(Boolean);
+            d.head.textContent = "Re-plan preview - the re-plan failed";
+            d.body.textContent = msgs.join("\n") || status.summary ||
+                "The plan node reported an error (it may have refused: nothing to plan, or a " +
+                "pairing that seeds from a plate holding no faces).";
+            d.foot.appendChild(button("Close", "", d.close));
+            return false;
+        }
+        if (status && (status.completed || status.status_str === "success" || entry.outputs)) {
+            return true;
+        }
+        if (Date.now() - t0 > 300000) {
+            d.head.textContent = "Re-plan preview - timed out";
+            d.body.textContent = "The re-plan run did not finish within 5 minutes.";
+            d.foot.appendChild(button("Close", "", d.close));
+            return false;
+        }
+    }
+}
+
+async function replanPreview(node) {
+    if (renderRunning()) {
+        const d = dialog("Re-plan preview");
+        showWait(d, node);
+        return;
+    }
+    const wd = w(node, "job_name");
+    const scratch = scratchName(wd ? String(wd.value || "") : "");
+    const d = dialog("Re-plan preview - " + scratch);
+    d.msg.textContent = "building a plan-only prompt from the current settings…";
+
+    let built;
+    try {
+        built = await app.graphToPrompt();
+    } catch (e) {
+        d.head.textContent = "Re-plan preview - could not read the graph";
+        d.body.textContent = "The front end could not serialize the workflow: " + e;
+        d.foot.appendChild(button("Close", "", d.close));
+        return;
+    }
+    const prompt = built.prompt || built.output || {};
+    const planId = String(node.id);
+    const sub = ancestorSubgraph(prompt, planId);
+    if (!sub[planId]) {
+        d.head.textContent = "Re-plan preview - plan node not in the serialized graph";
+        d.body.textContent = "The plan node had no serializable inputs to run on.";
+        d.foot.appendChild(button("Close", "", d.close));
+        return;
+    }
+    // Redirect the plan node's output into the scratch folder: the guard never sees the real job.
+    sub[planId].inputs = sub[planId].inputs || {};
+    sub[planId].inputs["job_name"] = scratch;
+
+    let promptId;
+    try {
+        const r = await api.fetch("/prompt", {
+            method: "POST",
+            body: JSON.stringify({ prompt: sub, client_id: api.getClientId() }),
+        });
+        if (r.error || (r.node_errors && Object.keys(r.node_errors).length)) {
+            throw new Error(JSON.stringify(r.node_errors || r.error));
+        }
+        promptId = r.prompt_id;
+    } catch (e) {
+        d.head.textContent = "Re-plan preview - run rejected";
+        d.body.textContent = String(e);
+        d.foot.appendChild(button("Close", "", d.close));
+        return;
+    }
+    d.msg.textContent = "detecting and re-pairing on the clip + reference (no render)…";
+    const ok = await waitForPrompt(promptId, d);
+    if (!ok) return;   // waitForPrompt already wrote the reason into the dialog
+    d.close();
+    await openPanel(node, scratch);
 }
 
 /* --------------------------------------------------------------- register */
@@ -306,12 +440,16 @@ app.registerExtension({
             const r = created ? created.apply(this, arguments) : undefined;
             const btn = this.addWidget("button", "Pairing preview", null,
                                        () => openPanel(this));
+            const replan = this.addWidget("button", "Re-plan preview", null,
+                                          () => replanPreview(this));
             // A button holds no value, so it must not be serialised: a slot in widgets_values
             // would reinterpret every saved widget after it (ADR 0002 - the plan node's widget
             // order is permanent, and this adds no widget to it).
-            if (btn) {
-                btn.serialize = false;
-                btn.serializeValue = () => undefined;
+            for (const b of [btn, replan]) {
+                if (b) {
+                    b.serialize = false;
+                    b.serializeValue = () => undefined;
+                }
             }
             return r;
         };

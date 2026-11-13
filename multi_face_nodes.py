@@ -149,6 +149,26 @@ def _write_reference_png(path, frame, rect) -> tuple[int, int]:
     return int(crop.shape[1]), int(crop.shape[0])
 
 
+def _clip_crop_rect(box, W: int, H: int, pad: float = 0.20):
+    """Turn a clip face's xyxy box into an xywh crop rect for the pairing panel (#9).
+
+    Padded a little and clamped to the frame: an edge-tight box crops the chin and hair off,
+    which reads worse than a hair of background beside the face. Returns None if the box
+    collapses, so a degenerate detection just shows no clip crop rather than a bad slice.
+    """
+    x0, y0, x1, y1 = (float(v) for v in box[:4])
+    bw, bh = x1 - x0, y1 - y0
+    if bw <= 1 or bh <= 1:
+        return None
+    x0, x1 = x0 - bw * pad, x1 + bw * pad
+    y0, y1 = y0 - bh * pad, y1 + bh * pad
+    x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
+    x1, y1 = min(int(W), int(round(x1))), min(int(H), int(round(y1)))
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return None
+    return [x0, y0, x1 - x0, y1 - y0]
+
+
 
 def _write_preview_png(path, preview) -> str:
     """Write the pairing preview image the node already built into the job folder (#9).
@@ -579,6 +599,19 @@ class H3MultiFacePlan:
                                      subject["ref_crop"])
                 subject["ref_file"] = file_name
                 refs += 1
+        # Also cut each subject's face out of the match-frame clip, so the pairing panel can
+        # show the clip face beside the reference (#9). Only a subject with a clip face on the
+        # match frame gets one; a still-only subject has no clip_box, so the panel shows a
+        # placeholder for it instead.
+        clip_W, clip_H = int(images[frame].shape[1]), int(images[frame].shape[0])
+        for subject in plan["subjects"]:
+            box = subject.get("clip_box")
+            if box:
+                rect = _clip_crop_rect(box, clip_W, clip_H)
+                if rect is not None:
+                    clip_name = f"clip_{int(subject['index'])}.png"
+                    _write_reference_png(os.path.join(job, clip_name), images[frame], rect)
+                    subject["clip_file"] = clip_name
         # #9: the pairing preview is written here too, before the plan is, so a folder that has
         # a plan also has everything the plan says it wrote. The panel reads this file rather
         # than drawing anything, which is what lets it stay read-only.

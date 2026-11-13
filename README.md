@@ -1099,6 +1099,9 @@ The folder itself:
     pairing_preview.png            both plates at the match frame, every face numbered
     subject_0.png  subject_1.png   one subject reference each - a crop of the still, or, for a
                                    whole-still subject, all of it
+    clip_0.png     clip_1.png      each subject's face cut from the match-frame clip, beside its
+                                   reference - the panel shows the two together (a subject with no
+                                   clip face on the match frame has no clip_N.png)
     passes/
         subject_0000/
             crops/frame_0000.png …     the crops that pass was fed, in frame order
@@ -1178,15 +1181,27 @@ have, which is what catches a folder left over from a plan you have since change
 
 ### The pairing preview panel
 
-The plan node carries a panel — **View pairing preview** — showing `pairing_preview.png` and every
-subject's reference crop, so a pairing can be checked beside the node that made it instead of by
-opening the folder in a file browser.
+The plan node carries a panel — **Pairing preview** — showing `pairing_preview.png` and, per
+subject, **both** faces side by side: the clip face cut from the match frame (`clip_N.png`) and the
+reference it is conditioned on (`subject_N.png`). A still-only subject has no clip face on the match
+frame, so it shows a placeholder in its place. A pairing can be checked beside the node that made
+it instead of by opening the folder in a file browser.
 
-It is **read-only, and deliberately so**: it reads `plan.json`, `pairing_preview.png` and the
-`subject_N.png` files out of the job folder and decides nothing of its own, so it cannot disagree
-with the graph. Exclusions stay the typed `excluded_faces` widget — there is no click-to-exclude,
-because a panel that re-decided the plan in the browser would be a second source of truth about who
-the subjects are, and the plan is the one the passes were already cut against.
+The **Pairing preview** view is **read-only, and deliberately so**: it reads `plan.json`,
+`pairing_preview.png`, `subject_N.png` and `clip_N.png` out of the job folder and decides nothing of
+its own, so it cannot disagree with the graph. Exclusions stay the typed `excluded_faces` widget —
+there is no click-to-exclude, because a panel that re-decided the plan in the browser would be a
+second source of truth about who the subjects are, and the plan is the one the passes were already
+cut against.
+
+Next to it is **Re-plan preview**, which is *not* read-only but is **non-destructive**: it runs the
+plan node — with its own detection, pairing, preview and crops — into a throwaway job folder
+(`<job_name>__preview_<stamp>`) and opens the read-only panel on that. So you can change
+`unmatched_faces`, `max_subjects`, `match_frame`, the tolerance and so on and check the new pairing
+**without** tripping the pairing-fingerprint guard on your real job. Your real job folder and its
+passes are never touched; when you are happy with the pairing, leave the real `job_name` (and its
+same inputs) on the node and queue. Each click writes a fresh `__preview_*` folder, so two
+re-plans with different settings never collide; these throwaway folders are safe to delete.
 
 It **refuses to open or refresh while a render is running**, with no override, and the front end
 and the route enforce that independently:
