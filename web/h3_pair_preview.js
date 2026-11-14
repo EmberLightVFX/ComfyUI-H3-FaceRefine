@@ -331,8 +331,8 @@ function openFaceChooser(node, data, faceToken, candidates, currentToken, title,
     const g = dialog(title);
     g.body.appendChild(el("p", "h3pp-note",
         "Pick which face to use for this side, or no partner. This writes the node's pair_overrides "
-        + "widget - press Process Plan to apply it, and note it re-pairs the whole job, so its "
-        + "passes must be re-run."));
+        + "widget and re-plans the job right away (a quick detect + pair, no render) - it renumbers "
+        + "the subject set, so it clears completed passes and asks you to confirm first."));
     const grid = el("div", "h3pp-facegrid");
     for (const f of (candidates || [])) {
         grid.appendChild(faceCell(f, currentToken, () => { g.close(); apply(faceToken, f.token); }));
@@ -462,23 +462,25 @@ function render(d, data, node, name) {
             const off = tokenSet.has(tok);
             if (off) row.classList.add("off");
             cell.appendChild(button(off ? "Include this face again" : "Ignore this face",
-                "h3pp-toggle", () => {
-                    const now = applyExclude(node, tok, !off);
-                    render(d, data, node, name);
-                    d.msg.textContent = "excluded_faces on the node is now '" + now +
-                        "' - press Process Plan to apply (this panel still shows the last plan).";
-                }));
+                "h3pp-toggle", () => processPlan(node, {
+                    reason: "You changed which faces this job refines - " +
+                        (off ? "including " : "ignoring ") + tokenLabel(tok) + ".",
+                    applyLabel: "Apply - re-plan now",
+                    before: () => applyExclude(node, tok, !off),
+                    onConfirmed: () => d.close(),
+                })));
         }
         // Click either face image to re-pick that side. The clip image re-points the clip side of
         // the still face this subject tracks (face token s<still>); the reference image re-points
         // the reference of the clip face this subject tracks (face token <clip>). A side with no
         // partner on the other plate to re-point is left non-clickable.
-        const applyPick = (faceTok, tok) => {
-            const now = applyPairOverride(node, faceTok, tok);
-            render(d, data, node, name);
-            d.msg.textContent = "pair_overrides on the node is now '" + now +
-                "' - press Process Plan to apply (this panel still shows the last plan).";
-        };
+        const applyPick = (faceTok, tok) => processPlan(node, {
+            reason: "You re-paired a face in this job (a manual pairing over-rides the "
+                + "automatic match).",
+            applyLabel: "Apply - re-plan now",
+            before: () => applyPairOverride(node, faceTok, tok),
+            onConfirmed: () => d.close(),
+        });
         const canClip = (s.still_face !== null && s.still_face !== undefined);
         const canRef = (s.clip_face !== null && s.clip_face !== undefined);
         const curClip = (s.clip_face === null || s.clip_face === undefined) ? null : String(s.clip_face);
@@ -510,17 +512,17 @@ function render(d, data, node, name) {
     }
     if (offTokens.length) {
         d.body.appendChild(el("h4", "h3pp-sect",
-            "switched off in the excluded_faces widget - they keep their original pixels " +
-            "(Process Plan applies the widget to a fresh plan)"));
+            "switched off in this job - they keep their original pixels. Restore re-plans the "
+            + "job to bring one back in (that clears completed passes)"));
         const wrap = el("div", "h3pp-chips");
         for (const t of offTokens) {
             wrap.appendChild(el("span", "h3pp-chip off", tokenLabel(t)));
-            wrap.appendChild(button("Restore", "h3pp-toggle", () => {
-                const now = applyExclude(node, t, false);
-                render(d, data, node, name);
-                d.msg.textContent = "excluded_faces on the node is now '" + now +
-                    "' - press Process Plan to apply (this panel still shows the last plan).";
-            }));
+            wrap.appendChild(button("Restore", "h3pp-toggle", () => processPlan(node, {
+                reason: "You restored face " + tokenLabel(t) + " back into this job's subjects.",
+                applyLabel: "Apply - re-plan now",
+                before: () => applyExclude(node, t, false),
+                onConfirmed: () => d.close(),
+            })));
         }
         d.body.appendChild(wrap);
     }
@@ -576,12 +578,13 @@ async function openPanel(node, nameOverride) {
 
 /* ---------------------------------------------------------- process the plan */
 
-// Process Plan runs the REAL plan node into its real job_name and REPLACES the plan. The plan node
-// guards its folder against mixing two pairings, so before the run we ask the narrow replace route
-// to clear the plan node's OWN stale artifacts (plan.json -> plan_prev.json, the preview, the
-// subject/clip crops). The node then writes a fresh plan with nothing to refuse against. Pass
-// stages are left for the pass/composite nodes' own guards, so an old pass cannot mix with the new
-// plan - replacing a plan means its passes have to be re-run.
+// Process Plan re-runs the REAL plan node into its real job_name as a TRUE fresh start: the replace
+// route first WIPES the whole job (plan -> plan_prev.json, the preview and crops, manifest.json, the
+// subject cursor, and the entire passes/ tree), then the node writes a fresh plan with nothing to
+// refuse against. It is destructive (it deletes completed renders) and always confirmed first. The
+// panel's exclusion / pair-override controls call this SAME path the moment you change one, so a
+// change is applied to the job immediately (a quick detect + pair, no render) instead of waiting for
+// a manual Process Plan - which is why changing the subject set clears passes: their indices shift.
 
 // The plan node is an output node, so a prompt of just it plus the nodes that FEED it runs it
 // and stops there - no tracker, sampler or render. Walk the plan's link inputs upstream.
@@ -637,7 +640,8 @@ async function waitForPrompt(promptId, d) {
     }
 }
 
-async function processPlan(node) {
+async function processPlan(node, opts) {
+    opts = opts || {};
     if (renderRunning()) {
         const d = dialog("Process Plan");
         showWait(d, node);
@@ -647,9 +651,10 @@ async function processPlan(node) {
     const name = wd ? String(wd.value === null || wd.value === undefined ? "" : wd.value).trim() : "";
     const d = dialog("Process Plan" + (name ? " - " + name : ""));
 
-    // Process Plan now wipes the WHOLE job - the plan AND every saved pass (crops + stitched) - so
-    // the plan node re-plans from scratch, as if the job never ran. That deletes completed renders,
-    // so when a job exists we warn (with how many passes are on the line) and confirm first.
+    // Changing an exclusion / pair-override, or pressing Process Plan, re-plans the job from
+    // scratch: it clears the WHOLE job (plan + every saved pass, crops + stitched) because the
+    // subject set is renumbered, so old passes no longer line up. That deletes completed renders,
+    // so we warn (with how many passes are on the line) and confirm before doing anything.
     if (name) {
         let done = 0;
         try {
@@ -661,23 +666,42 @@ async function processPlan(node) {
             ? " This job has " + done + " completed pass" + (done === 1 ? "" : "es")
               + " (saved render" + (done === 1 ? "" : "s") + ") that will be DELETED."
             : "";
-        d.head.textContent = "Process Plan - wipe this job and start over?";
-        d.body.textContent = "Process Plan clears EVERYTHING this job ever wrote - the plan, the "
-            + "preview, and every saved pass (crops + stitched) - so the plan node re-plans from "
-            + "scratch, as if the job never ran. Re-pairing changes who the subjects are, so the "
-            + "old passes cannot be kept safely." + countNote + " This cannot be undone (the old "
-            + "plan is kept once as plan_prev.json). Afterwards the plan node writes a fresh plan; "
-            + "queue the graph again to render each subject from the first.";
+        const lead = opts.reason
+            ? opts.reason + " Applying it re-pairs the job (a quick detect + pair, no H3 render) "
+              + "and renumbers the subject set, so EVERY saved pass (crops + stitched) is cleared "
+              + "and the job re-plans from scratch, as if it never ran."
+            : "Process Plan clears EVERYTHING this job ever wrote - the plan, the preview, and "
+              + "every saved pass (crops + stitched) - so the plan node re-plans from scratch, as "
+              + "if the job never ran. Re-pairing changes who the subjects are, so the old passes "
+              + "cannot be kept safely.";
+        d.head.textContent = opts.reason ? "Apply this change - re-plan and start over?"
+                                         : "Process Plan - wipe this job and start over?";
+        d.body.textContent = lead + countNote + " This cannot be undone (the old plan is kept once "
+            + "as plan_prev.json). Afterwards the plan node writes a fresh plan; queue the graph "
+            + "again to render each subject from the first.";
         d.foot.innerHTML = "";
         const confirmed = await new Promise((resolve) => {
             d.foot.appendChild(button("Cancel", "", () => { d.close(); resolve(false); }));
-            d.foot.appendChild(button("Process Plan - wipe everything", "h3pp-danger",
-                () => resolve(true)));
+            d.foot.appendChild(button(opts.applyLabel || "Process Plan - wipe everything",
+                "h3pp-danger", () => resolve(true)));
         });
         if (!confirmed) return;
+        // Confirmed: drop the panel that asked (processPlan reopens a fresh one after the run).
+        if (opts.onConfirmed) { try { opts.onConfirmed(); } catch (e) { /* best effort */ } }
         d.head.textContent = "Process Plan" + (name ? " - " + name : "");
         d.body.textContent = "";
         d.foot.innerHTML = "";
+    }
+    // Write the node widget only now that the change is confirmed, then build the plan-only prompt
+    // from the graph (which now carries the new excluded_faces / pair_overrides).
+    if (opts.before) {
+        try { opts.before(); }
+        catch (e) {
+            d.head.textContent = "Process Plan - could not set the node widget";
+            d.body.textContent = String(e);
+            d.foot.appendChild(button("Close", "", d.close));
+            return;
+        }
     }
     d.msg.textContent = "building a plan-only prompt from the current settingsâ€¦";
 
