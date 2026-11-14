@@ -1290,6 +1290,23 @@ def load_subject_reference(job_dir, subject):
             f"again" + bump)
 
 
+def _subject_walk_signature(job) -> str:
+    """A stable signature of a job's pass walk: the manifest and the subject cursor, each keyed on
+    mtime_ns + size. Subject Select reads this state inside run() but carries none of it in its
+    graph inputs (plan + face_pick), so ComfyUI's output cache would otherwise hand back the SAME
+    subject every queue and the walk would stall on subject 0 forever. IS_CHANGED keys on this so a
+    completed pass - which rewrites those files - moves the signature and forces Subject Select to
+    recompute and hand over the next subject. Missing files read as "none"."""
+    sig = []
+    for path in (plan_store.manifest_path(job), plan_store.subject_cursor_path(job)):
+        try:
+            st = os.stat(path)
+            sig.append(f"{int(st.st_mtime_ns)}-{int(st.st_size)}")
+        except OSError:
+            sig.append("none")
+    return "|".join(sig)
+
+
 class H3SubjectSelect:
     """Choose one **subject** out of the subject plan and emit a pick payload for that one
     person, in the shape `H3 Face Track + Crop` already accepts (ADR 0005).
@@ -1388,6 +1405,27 @@ class H3SubjectSelect:
         # whichever subject `next` resolves to. ADR 0006 - the composite checks the same rule.
         previous = int(_expected_chain_base(plan, int(chosen["index"])))
         return (narrowed, reference, int(exists), int(chosen["index"]), previous, report)
+
+    @classmethod
+    def IS_CHANGED(cls, plan=None, face_pick=None, **kwargs):
+        """Force Subject Select to re-run whenever the job's pass walk changed.
+
+        The next subject is decided by reading the job folder's manifest/cursor inside run(), not
+        from this node's inputs (plan + face_pick, which a reused plan keeps byte-identical across
+        queues). Without an invalidation ComfyUI serves this node - and the whole tracker -> sampler
+        -> Pass Save chain behind it - from its output cache after the first pass, so the walk stalls
+        on subject 0 and H3 Multi-Face Composite fails identically every queue. Keying the signature
+        on the walk state (the plan node does the same for plan.json's presence) makes a completed
+        pass - which rewrites the manifest/cursor - recompute the next subject. A plan with no job
+        folder returns NaN so run() still runs and names the missing job plainly.
+        """
+        try:
+            job = job_dir_for_plan(plan) if isinstance(plan, dict) else None
+        except Exception:
+            return float("nan")          # cannot resolve the folder -> let run() run and report
+        if not job:
+            return float("nan")          # no job folder recorded -> run() takes the first subject
+        return _subject_walk_signature(job)
 
 
 # ----------------------------------------------------------------------------
