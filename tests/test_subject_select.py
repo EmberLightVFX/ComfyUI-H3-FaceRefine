@@ -435,29 +435,58 @@ def _job(tmp_path, job_name="walk job"):
     return ps.job_dir_for(str(tmp_path / "output"), job_name)
 
 
-def test_increment_walk_advances_the_subject_value_each_queue(monkeypatch, tmp_path):
+def test_increment_walk_advances_only_as_passes_complete(monkeypatch, tmp_path):
+    """The chained model runs one subject per queue and only moves on once that subject's stitched
+    pass is on record - so the walk advances with the manifest, not a blind counter."""
     plan = _walk_plan()
     node = _walk_select(monkeypatch, tmp_path)
+    job = _job(tmp_path)
 
-    # subject_index is return slot 3, previous_subject slot 4 (the chain feed).
-    runs = [node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT) for _ in range(3)]
-    assert [r[3] for r in runs] == [0, 1, 2]
-    assert [r[4] for r in runs] == [-1, 0, 1]                 # each builds on the one before it
-    assert ps.read_subject_cursor(_job(tmp_path))["cursor"] == 3   # one past the last subject
+    seen, prevs = [], []
+    for _ in range(3):
+        r = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)
+        seen.append(r[3])          # subject_index
+        prevs.append(r[4])         # previous_subject (the chain feed)
+        _write_manifest(job, {str(i): {"complete": True} for i in seen})   # each pass now saved
+    assert seen == [0, 1, 2]
+    assert prevs == [-1, 0, 1]      # each builds on the one before it
 
 
-def test_the_report_shows_where_the_value_lands_each_queue(monkeypatch, tmp_path):
+def test_increment_does_not_outrun_an_unsaved_pass(monkeypatch, tmp_path):
+    """A queue that crashes after this node advanced the cursor must be retried, not skipped: with
+    no pass ever saved, the walk stays on subject 0 instead of running subject 1 onto a chain that
+    never existed (which is exactly the Pass Load error it used to deadlock on)."""
     plan = _walk_plan()
     node = _walk_select(monkeypatch, tmp_path)
+    seen = [node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[3] for _ in range(3)]
+    assert seen == [0, 0, 0]
+
+
+def test_the_walk_resumes_past_a_saved_subject_but_not_past_a_missing_one(monkeypatch, tmp_path):
+    """Subject 1's pass is on record but subject 0's is not: the chain cannot honour that, so the
+    walk goes back to the earliest subject with no pass, then moves up only as passes land."""
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+    job = _job(tmp_path)
+    os.makedirs(str(job), exist_ok=True)
+    _write_manifest(job, {"1": {"complete": True}})      # 1 done, 0 missing (an out-of-order job)
+
+    assert node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[3] == 0   # jump to seed 0
+    assert node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[3] == 0   # continued: 0 still open
+
+
+def test_the_report_shows_the_current_id_and_where_it_lands(monkeypatch, tmp_path):
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+    job = _job(tmp_path)
 
     first = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[5]
     assert "you are on subject 0 of 3" in first
-    assert "after this queue the subject value advances to 1" in first
+    assert "advances to 1" in first
+    assert "taken again until its pass is saved" in first     # the self-heal is stated
+    _write_manifest(job, {"0": {"complete": True}})
     second = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[5]
-    assert "you are on subject 1 of 3" in second
-    assert "advances to 2" in second
-    last = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[5]
-    assert "advances to 3" in last and "past the last subject 2" in last
+    assert "you are on subject 1 of 3" in second and "advances to 2" in second
 
 
 def test_fixed_value_holds_one_subject_across_queues(monkeypatch, tmp_path):
