@@ -2318,16 +2318,26 @@ def plan_is_resumed(job_dir) -> bool:
 
 
 def changed_widget_lines(stored_plan, current_plan) -> list[str]:
-    """One short line per plan-deciding WIDGET the graph now sets differently from the saved plan.
+    """One short line per plan-deciding input the graph now sets differently from the saved plan.
 
-    This is the reuse-run's warning, not the pass nodes' refusal: it names only the widget inputs
-    a person edits (not the measured boxes), and counts the subject sets rather than dumping every
+    This is the reuse-run's warning, not the pass nodes' refusal: it names the widget inputs a
+    person edits (including the detector and confidence the run recorded - a face detector swapped
+    for a person detector can land on the SAME subject indices, and without naming it the reuse
+    would silently keep the old subjects), and counts the subject sets rather than dumping every
     subject, so it reads as "here is what you changed that this run did not apply".
     """
     before = pairing_fingerprint(stored_plan)
     after = pairing_fingerprint(current_plan)
     out = []
     for field in PAIRING_INPUT_FIELDS:
+        if before[field] != after[field]:
+            out.append(f"{field}: the node now has {_describe(after[field])}, the saved plan "
+                       f"used {_describe(before[field])}")
+    # The detector and confidence live in the run record, not the plan widgets, but a person edits
+    # them too. They matter most when the subject set is otherwise unchanged: the same index can
+    # come from a face box or a person box, so this line is the only thing that says the crops the
+    # panel still shows were cut by the old detector.
+    for field in PAIRING_RUN_FIELDS:
         if before[field] != after[field]:
             out.append(f"{field}: the node now has {_describe(after[field])}, the saved plan "
                        f"used {_describe(before[field])}")

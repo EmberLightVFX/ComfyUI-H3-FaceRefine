@@ -146,6 +146,26 @@ def test_changed_widget_lines_is_empty_when_the_run_matches_the_saved_plan():
     assert ps.changed_widget_lines(_two_plans(), _two_plans()) == []
 
 
+def test_swapping_face_for_person_detector_warns_even_with_the_same_subject_set():
+    """A face detector swapped for a person detector can pair the SAME subject indices, so the
+    reuse run must name the detector: without that line the run silently keeps the old face
+    subjects and the panel keeps showing faces while the user expected full people."""
+    saved = _two_plans(); saved["run"] = {"detector": "face", "confidence": 0.35}
+    now = _two_plans();   now["run"]   = {"detector": "person", "confidence": 0.35}
+    lines = ps.changed_widget_lines(saved, now)
+    assert any(line.startswith("detector") and "person" in line and "face" in line
+               for line in lines)
+    # The subject indices are unchanged, so this line - not a subject-set line - is the signal.
+    assert not any("subject set" in line for line in lines)
+
+
+def test_changing_only_the_confidence_warns_on_a_reuse_run():
+    saved = _two_plans(); saved["run"] = {"detector": "person", "confidence": 0.35}
+    now = _two_plans();   now["run"]   = {"detector": "person", "confidence": 0.5}
+    lines = ps.changed_widget_lines(saved, now)
+    assert any(line.startswith("confidence") for line in lines)
+
+
 def test_identical_plates_pair_by_position():
     """Two plates framed identically: each face finds the face in the same place."""
     clip = [[100, 100, 200, 220], [400, 120, 520, 260]]
