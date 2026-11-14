@@ -314,6 +314,32 @@ def test_the_multi_face_flow_never_wires_reference_audio_into_h3():
     assert wired == [], f"multi-face template must not wire reference audio, found {wired}"
 
 
+def test_a_multi_face_graph_that_wires_ref_audio_is_caught():
+    """graph_check flags the fault generally, not just on the shipped template: any multi-face
+    graph that reconnects reference audio into the H3 node is refused, so a hand-built or restored
+    graph is caught before the audio VAE crashes."""
+    workflow = _load("H3_Face_Refine_Multi_Face.json")
+    for node in workflow["nodes"]:
+        if node.get("type") != "MiniMaxH3ReferenceToVideo":
+            continue
+        for inp in node.get("inputs", []):
+            if inp["name"] == "ref_audios.ref_audio_0":
+                inp["link"] = 999999            # pretend the audio link was put back
+    problems = [p for p in gc.check_graph(workflow) if p.code == "NO_REF_AUDIO_IN_MULTIFACE"]
+    assert problems, "a multi-face graph that wires ref audio into H3 must be flagged"
+    assert "ref_audios.ref_audio_0" in problems[0].message
+
+
+def test_the_single_face_templates_are_left_alone_by_the_ref_audio_rule():
+    """The single-face Auto/Manual templates deliberately wire reference audio (a different audio
+    contract, real-audio sources). With no multi-face node present, the rule must not fire there."""
+    for name in ("H3_Face_Refine_Auto_Select.json", "H3_Face_Refine_Manual_Select.json"):
+        workflow = _load(name)
+        problems = [p for p in gc.check_graph(workflow) if p.code == "NO_REF_AUDIO_IN_MULTIFACE"]
+        assert not problems, f"{name} is single-face and must not trip the multi-face audio rule"
+
+
+
 
 
 

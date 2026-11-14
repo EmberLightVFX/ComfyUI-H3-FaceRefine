@@ -379,6 +379,47 @@ def _check_pass_chain_order(workflow):
     return problems
 
 
+# Node types that exist ONLY in the multi-face flow. Their presence marks a graph as multi-face;
+# the single-face templates (Auto/Manual Select) lack all of them and keep their reference audio
+# on purpose, so this rule deliberately does not fire there.
+_MULTIFACE_TYPES = frozenset({
+    "H3MultiFacePlan", "H3SubjectSelect", "H3PassSave", "H3PassLoad", "H3MultiFaceComposite",
+})
+
+
+def _check_ref_audio(workflow):
+    """A multi-face flow must not feed reference audio into MiniMaxH3ReferenceToVideo.
+
+    ADR 0001 / the composite's audio note: multi-face takes the finished clip's audio from the
+    target clip at assembly and discards H3's generated audio, so conditioning H3 on a reference
+    audio does nothing useful here. Worse, a reference audio carried off a silent source clip is a
+    near-empty waveform the H3 audio VAE cannot encode ("padded input (6) < kernel 7"), which is
+    what crashed node 30/11 in the user's graph. The single-face templates are a different audio
+    contract and are left untouched.
+    """
+    nodes = workflow.get("nodes") or []
+    multiface = any(_is_active(n) and n.get("type") in _MULTIFACE_TYPES for n in nodes)
+    if not multiface:
+        return []
+    problems = []
+    for node in nodes:
+        if not _is_active(node) or node.get("type") != "MiniMaxH3ReferenceToVideo":
+            continue
+        for inp in node.get("inputs") or []:
+            name = inp.get("name") or ""
+            if (name.startswith("ref_audios.") or name.startswith("ref_video_audios.")) \
+                    and inp.get("link") is not None:
+                problems.append(Problem(
+                    "NO_REF_AUDIO_IN_MULTIFACE",
+                    f"MiniMaxH3ReferenceToVideo (id {node['id']}) wires reference audio on "
+                    f"`{name}`. The multi-face flow discards H3's generated audio and takes the "
+                    f"clip's audio from the target clip at assembly, so this does nothing here - "
+                    f"and a near-empty (silent source) waveform crashes the audio VAE. Leave the "
+                    f"ref_audios / ref_video_audios sockets unwired.",
+                    (node["id"],)))
+    return problems
+
+
 def check_graph(workflow):
     """Every pack invariant this workflow breaks. Empty list means it is internally sound."""
     problems = []
@@ -388,4 +429,5 @@ def check_graph(workflow):
     problems += _check_scheduler_steps(workflow)
     problems += _check_orphans(workflow)
     problems += _check_pass_chain_order(workflow)
+    problems += _check_ref_audio(workflow)
     return problems
