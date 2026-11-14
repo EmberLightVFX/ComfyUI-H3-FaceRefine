@@ -1050,7 +1050,7 @@ subject, so it has to be visible at the node that made it.
 | `job_name` | empty | The **job folder** under ComfyUI's output folder. Left blank it is named after the clip. **Keep the same name to resume a job** — change it, or change an input the fingerprint tracks, and the pass nodes **refuse** rather than mixing two pairings into one clip, while **H3 Multi-Face Plan** *reuses* the saved plan and warns that the change was not applied (press **Process Plan** to apply it). |
 | `unmatched_faces` | `leave` | What becomes of an **unpaired face** — a face on one plate with no partner on the other. It decides the **subject set**, so it lives here rather than on the pass nodes, and it is recorded in `plan.json`. See [`unmatched_faces`](#unmatched_faces-three-answers). |
 | `crop_factor` | `2.5` | The crop factor **H3 Face Track + Crop** will use for this job. Set it to that node's `crop_factor`, and to nothing else: each **subject reference** is cut with the rectangle that factor gives — crop_factor × face height, centred on the face, mapped into the **reference still** at its native resolution. A number that differs from the tracker's mis-frames every reference in the job, so it is recorded in `plan.json` (the overlap warnings, the pairing preview and a resumed job all read it back from there) and it joins the **pairing fingerprint**. |
-| `pair_overrides` | empty | Manual pairings, for when the automatic pairing matched the **wrong** two faces. Set by clicking a face image in the pairing panel, or by hand: comma-separated `face=partner`, where a face is a bare **target clip** number or an `s`-prefixed **reference still** number, and the partner is another face on the other plate or `none` — e.g. `0=s2` (clip face 0's reference is still face 2), `s1=0` the same fact from the other side, `2=none` to switch a face's partner off. A manual pairing over-rides the positional guess, and the plan node re-pairs the whole job when **Process Plan** runs, so its passes must be re-run. Recorded in `plan.json` and part of the **pairing fingerprint**. |
+| `pair_overrides` | empty | Manual pairings, for when the automatic pairing matched the **wrong** two faces. Set by clicking a face image in the pairing panel, or by hand: comma-separated `face=partner`, where a face is a bare **target clip** number or an `s`-prefixed **reference still** number, and the partner is another face on the other plate or `none` — e.g. `0=s2` (clip face 0's reference is still face 2), `s1=0` the same fact from the other side, `2=none` to switch a face's partner off. A manual pairing over-rides the positional guess; changing one in the panel applies to the job **immediately** (it writes this widget then re-runs the plan node), which renumbers the subject set and so clears the job's saved passes — the panel confirms first. You can also edit this widget by hand, then press **Process Plan** to commit it. Recorded in `plan.json` and part of the **pairing fingerprint**. |
 
 **Outputs**
 
@@ -1219,30 +1219,28 @@ it instead of by opening the folder in a file browser.
 The **Pairing preview** view reads `plan.json`, `pairing_preview.png`, `subject_N.png` and
 `clip_N.png` out of the job folder and decides nothing of its own, so it cannot disagree with the
 graph. Each face row carries an **Ignore this face** / **Include this face again** toggle, and each
-switched-off face carries **Restore**. These write **only** the node's own `excluded_faces` widget —
-the single sanctioned control for switching a face off (the same typed widget, so a low-confidence
-face that got matched twice can be switched off once and refined only once). They set no pairing
-directly and re-plan nothing in the browser: the plan node re-decides on the next **Process Plan**,
-so the panel never becomes a second source of truth, and the passes are always cut against the
-node's decision, not the panel's. A pending toggle is shown in the switched-off list until you
-re-plan, then applied. There is also a click-to-re-pair editor: **click the clip-face image** to
-pick which target-clip face this subject tracks, or **click the reference image** to pick which
-reference-still face it is conditioned on. Each opens a grid of every face on that plate — a
-thumbnail where the plan node already cut one and the face number otherwise, the current match
-marked — plus a **no partner** choice. Picking writes **only** the node's `pair_overrides` widget
-(`0=s2`, `s1=0`, `2=none`, …), which over-rides the positional guess; the plan node re-pairs the
-whole job on the next **Process Plan**, so the panel still decides nothing of its own and that job's
-passes have to be re-run.
+switched-off face carries **Restore**; there is also a click-to-re-pair editor (**click the
+clip-face image** to pick which target-clip face this subject tracks, **click the reference image**
+to pick which reference-still face it is conditioned on — a grid of every face on that plate plus a
+**no partner** choice). Changing any of them **applies to the job immediately**: the panel writes the
+node's `excluded_faces` / `pair_overrides` widget, then re-runs the plan node (the same path as
+**Process Plan**) so the plan is re-detected, re-paired and rewritten with the change in it. You no
+longer press **Process Plan** separately for a toggle or a re-pair to take effect.
 
-Above it is **Process Plan**, which is *not* read-only: it **replaces** this node's `job_name` plan.
-Because the plan node now *reuses* any saved plan rather than re-planning, Process Plan first clears
-the plan node's OWN stale artifacts — the previous `plan.json` is kept as `plan_prev.json`, and the
-preview and the subject/clip crops are removed — so the node re-runs with nothing to reuse and
-detects, pairs and writes fresh into the same name. That is the one way to change an existing job's
-pairing. It authors no pairing itself, and it never touches pass stages (`manifest.json`,
-`passes/`): if those belonged to the previous pairing, the Pass/Composite nodes' own guards refuse
-them, so replacing a plan means its passes have to be re-run. Use it to commit an Ignore toggle, a
-re-pair, or any changed input to the job you are about to queue.
+The panel still owns no pairing of its own: the plan node re-decides the subject set, so it never
+becomes a second source of truth, and the passes are always cut against the node's decision. The
+re-plan is cheap (one detection + pairing pass, **no H3 render**) but it renumbers the subject set,
+so — exactly like **Process Plan** — it **clears every saved pass** (crops + stitched) and the panel
+**asks you to confirm first**, naming how many completed renders that deletes. To undo a change,
+toggle the face back or **Restore** it; the reopened panel keeps every switched-off face in its
+switched-off list with a **Restore** button, so a change is always reversible (each undo is itself a
+re-plan).
+
+**Process Plan** is the same wipe-and-re-plan, for when nothing in the panel changed but an *input*
+did (a new clip, a different `crop_factor`, `match_tolerance`, `max_subjects`, …): it clears the whole
+job — the plan (kept once as `plan_prev.json`), the preview and crops, `manifest.json`, the subject
+walk, and the entire `passes/` tree — then re-plans from scratch. It is the one way to commit a
+changed input to the job you are about to queue, and it is destructive, so it confirms too.
 
 It **refuses to open or refresh while a render is running**, with no override, and the front end
 and the route enforce that independently:
