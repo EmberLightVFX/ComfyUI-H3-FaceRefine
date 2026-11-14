@@ -1249,6 +1249,65 @@ def clear_plan_artifacts_for_replace(job_dir) -> dict:
     return {"existed": True, "cleared": cleared, "prev": prev}
 
 
+def _remove_tree(path) -> None:
+    """Remove a directory tree using only `os` (plan_store stays torch/comfy-free)."""
+    for root, dirs, files in os.walk(path, topdown=False):
+        for name in files:
+            try:
+                os.remove(os.path.join(root, name))
+            except OSError:
+                pass
+        for name in dirs:
+            try:
+                os.rmdir(os.path.join(root, name))
+            except OSError:
+                pass
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
+
+
+def clear_job_for_replace(job_dir) -> dict:
+    """Start one job over from scratch: clear EVERYTHING the pipeline wrote - the plan artifacts
+    AND every saved pass - so the job reads as if it had never run. This is what the pairing
+    panel's **Process Plan** button does.
+
+    Why wipe the passes too: re-pairing a job changes WHO the subjects are (and possibly the clip
+    length), so passes saved under the old pairing are a different subject set - keeping them lets
+    the chain composite onto a stale or shorter pass and breaks `H3 Face Stitch`. Dropping them
+    makes a re-plan a true fresh start. This is the destructive counterpart of `reset_run`, which
+    clears only the pass bookkeeping and keeps every frame.
+
+    Keeps exactly one safety copy: the previous ``plan.json`` is moved to ``plan_prev.json``.
+    Everything else the job held - ``plan.json``, the pairing preview, the subject/clip crops,
+    ``manifest.json``, the subject-cursor file, and the whole ``passes/`` tree - is removed.
+    Returns the plan-replace result (``existed``/``cleared``/``prev``) plus ``passes_removed``
+    (subjects), ``manifest_removed`` and ``cursor_removed``.
+    """
+    res = clear_plan_artifacts_for_replace(job_dir)
+    res["passes_removed"] = 0
+    res["manifest_removed"] = False
+    res["cursor_removed"] = False
+    job = str(job_dir)
+    if not res["existed"]:
+        return res
+    pdir = os.path.join(job, PASSES_DIRNAME)
+    if os.path.isdir(pdir):
+        res["passes_removed"] = sum(1 for e in os.listdir(pdir)
+                                    if os.path.isdir(os.path.join(pdir, e)))
+        _remove_tree(pdir)
+    mp = manifest_path(job)
+    if os.path.isfile(mp):
+        os.remove(mp)
+        res["manifest_removed"] = True
+    cp = subject_cursor_path(job)
+    if os.path.isfile(cp):
+        os.remove(cp)
+        res["cursor_removed"] = True
+    return res
+
+
 def _json_default(value):
     """Every measurement here came through numpy; JSON wants plain Python numbers."""
     if isinstance(value, np.bool_):

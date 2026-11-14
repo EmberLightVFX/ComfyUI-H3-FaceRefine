@@ -696,8 +696,9 @@ class H3MultiFacePlan:
             # already holds one pairing's plan, references and passes, so re-running the flow here
             # REUSES that saved plan rather than re-cutting it: every output stays consistent with
             # the passes already in the folder, and re-running is never destructive. To write a new
-            # plan into this name the user presses the pairing panel's Process Plan (which clears
-            # the folder's plan artifacts first) or picks a new job_name. If the node's widgets now
+            # plan into this name the user presses the pairing panel's Process Plan (which clears the
+            # whole job - plan artifacts AND every saved pass - so the job starts over) or picks a new
+            # job_name. If the node's widgets now
             # differ from how the job was planned, that change is deliberately NOT applied to this
             # run - applying it would orphan the existing passes - so the report says so and names
             # what differs, instead of raising the pass nodes' refusal.
@@ -720,8 +721,9 @@ class H3MultiFacePlan:
                     "NOTICE - your settings on this node differ from the plan already saved here, "
                     "so THIS run did NOT apply them (it reused the saved subject set so the "
                     "existing passes stay valid). To apply them, press the pairing panel's "
-                    "Process Plan button (it replaces the plan - the job's passes must then be "
-                    "re-run) or set a new job_name. What differs:")
+                    "Process Plan button (it WIPES this job - the plan AND every saved pass - and "
+                    "re-plans from scratch, so every subject is then re-rendered) or set a new "
+                    "job_name. What differs:")
                 notes.extend("  - " + line for line in changed)
             refs = sum(1 for subject in plan["subjects"] if subject.get("ref_file"))
             written = plan_store.plan_path(job)

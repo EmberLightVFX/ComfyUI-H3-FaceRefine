@@ -51,13 +51,13 @@ except Exception as _exc:  # the nodes must load even if the picker route does n
 # (clip_N.png) and the reference crop (subject_N.png) - read out of the job folder. The preview
 # route has one read-only route plus one narrow write action, and its own front-end script: the
 # panel's per-face toggle edits only the node's typed `excluded_faces` widget (which the node
-# re-decides on), a `pair_preview/replace` POST clears a job's OWN stale plan artifacts (the
-# previous plan kept as `plan_prev.json`, plus the preview and subject/clip crops) so the plan node
-# can re-run into the same `job_name` and REPLACE the plan, and a `pair_preview/reset` POST clears a
-# job's pass BOOKKEEPING (the manifest's pass records and the subject walk) so the walk starts over -
-# non-destructive to plan.json, the references and the saved frames. The panel's buttons - Process
-# Plan, Reset run, Pairing preview - drive these; they author no pairing and never touch pass frames.
-# Registered the same way as the picker, so the nodes still load if the route does not register.
+# re-decides on), a `pair_preview/replace` POST (Process Plan) WIPES a job ENTIRELY - its plan (kept
+# once as `plan_prev.json`), preview, crops, manifest, subject cursor and the whole passes/ tree - so
+# the plan node re-runs as a true fresh start (DESTRUCTIVE: it deletes completed renders), and a
+# `pair_preview/reset` POST (Reset run) clears only a job's pass BOOKKEEPING (the manifest's pass
+# records and the subject walk) so the walk starts over - non-destructive to plan.json, the references
+# and the saved frames. Process Plan wipes everything; Reset run only rewinds the walk. Both author no
+# pairing. Registered the same way as the picker, so the nodes still load if the route does not register.
 try:
     from . import pair_preview_api
 

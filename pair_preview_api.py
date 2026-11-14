@@ -12,22 +12,26 @@ Read-only is the whole design, and it is what keeps this safe:
   graph, because it is the graph's own output;
 * the panel never authors or re-decides a pairing. It can do three things to a job, and none of
   them makes it a source of truth: a per-face toggle edits only the plan node's own typed
-  ``excluded_faces`` widget (this module only reports each face's widget token, `exclude_token`),
-  a "replace" action clears one job's stale PLAN artifacts so the plan node's OWN re-run can
-  overwrite them, and a "reset" action clears one job's pass BOOKKEEPING (the manifest's pass
-  records and the subject walk) so the walk starts over. None of them writes a plan, a crop, a
-  pairing or a pass stage's frames - the plan node is the only thing that decides and writes the
-  pairing, and the pass nodes write their own stages. See ``clear_plan_artifacts_for_replace`` and
-  ``reset_run``. The interactive re-pairing editor is still a later ticket;
+  ``excluded_faces`` widget (this module only reports each face's widget token, `exclude_token`);
+  a "replace" action (Process Plan) WIPES one job ENTIRELY - its plan, preview, crops, manifest,
+  subject cursor and every saved pass - so the plan node's OWN re-run starts the job over from
+  scratch (DESTRUCTIVE: it deletes completed renders; the front end confirms it, and one
+  ``plan_prev.json`` safety copy is kept); and a "reset" action (Reset run) clears only one job's
+  pass BOOKKEEPING (the manifest's pass records and the subject walk) so the walk starts over
+  without touching any frame. None of them writes a plan, a crop, a pairing or a pass stage's
+  frames - the plan node decides and writes the pairing, and the pass nodes write their own
+  stages. See ``clear_job_for_replace`` and ``reset_run``. The interactive re-pairing editor is
+  still a later ticket;
 * the images come back as ComfyUI's own ``/view`` URLs into the output folder. No new static
   file serving is invented here.
 
 Three routes share one namespace. ``/h3_facerefine/pair_preview`` (GET) is read-only and backed by
 one data function, `preview_state`, importable and testable without a server, which returns a
 state instead of raising when there is no plan, because "no plan yet for this job_name" is the
-normal state of a node nobody has queued. ``/h3_facerefine/pair_preview/replace`` (POST) clears one
-job's plan-node artifacts (plan.json to ``plan_prev.json``, the preview, and the subject/clip crops)
-so the plan node can re-run into the same name and REPLACE the plan. ``/h3_facerefine/pair_preview/reset``
+normal state of a node nobody has queued. ``/h3_facerefine/pair_preview/replace`` (POST - Process Plan) WIPES one job entirely - its plan
+(kept once as ``plan_prev.json``), preview and crops, ``manifest.json``, the subject cursor and the
+whole ``passes/`` tree - so the plan node re-runs into the same name as a true fresh start; it is
+DESTRUCTIVE (it deletes completed renders) and the front end confirms it. ``/h3_facerefine/pair_preview/reset``
 (POST) clears one job's pass BOOKKEEPING (the manifest's pass records and the subject-cursor file)
 so the always-next walk starts over; it is non-destructive to plan.json, the references, the preview
 and the saved pass frames. Both writes refuse while a render runs and neither authors a pairing.
@@ -51,8 +55,9 @@ except ImportError:  # imported by name from the pack root, as the unit tests do
 # picker's routes and script are untouched.
 PREVIEW_ROUTE = "/h3_facerefine/pair_preview"
 
-# The panel's one write action: clear a job's stale plan artifacts so the plan node can re-run
-# into the same job_name and replace the plan. Separate path so the read route stays read-only.
+# Process Plan's write action: wipe a job ENTIRELY (plan artifacts + manifest + subject cursor + the
+# whole passes/ tree, keeping one plan_prev.json) so the plan node re-runs into the same job_name as a
+# true fresh start. DESTRUCTIVE - deletes completed renders. Separate path so the read route is read-only.
 REPLACE_ROUTE = PREVIEW_ROUTE + "/replace"
 
 # The panel's second (and only other) write action: reset a job's run - clear the pass bookkeeping
@@ -419,13 +424,15 @@ def register():
 
     @routes.post(REPLACE_ROUTE)
     async def _replace_route(request):
-        """Clear one job's stale PLAN artifacts so a plan-node re-run can REPLACE the plan.
+        """Clear one job ENTIRELY so a plan-node re-run starts it over from scratch.
 
-        The panel's only write action, and a narrow one: it deletes only files the plan node itself
-        wrote (the plan, kept as plan_prev.json, plus the preview and subject/clip crops) so the
-        pairing-fingerprint guard has nothing to refuse on when the node re-runs into the same
-        job_name. It authors no pairing, and never touches pass stages (manifest.json, passes/) -
-        those nodes keep their own guards. Refuses while a render is running, like the read route.
+        **Process Plan**'s write action. It deletes everything the pipeline wrote for this job - the
+        plan (kept once as plan_prev.json), the preview, the subject/clip crops, `manifest.json`, the
+        subject-cursor file, and the whole `passes/` tree - so re-pairing is a true fresh start and
+        cannot leave stale or shorter passes to break the chain. This is DESTRUCTIVE (it removes
+        completed renders); the front end confirms it first, and it keeps a single plan_prev.json
+        safety copy. It still authors no pairing (the plan node re-decides on re-run). Refuses while
+        a render is running, like the read route.
         """
         try:
             body = await request.json()
@@ -439,7 +446,7 @@ def register():
                                       "replaced": False}, status=200)
         try:
             job = plan_store.job_dir_for(_output_root(), name)
-            res = plan_store.clear_plan_artifacts_for_replace(job)
+            res = plan_store.clear_job_for_replace(job)
         except Exception as exc:            # empty/illegal job_name, or a folder we cannot reach
             message = str(exc)
             return web.json_response({"ok": False, "status": "error", "error": message,
@@ -447,7 +454,11 @@ def register():
                                       "replaced": False}, status=200)
         return web.json_response({"ok": True, "status": "cleared", "job_name": name,
                                   "replaced": res["existed"], "cleared": res["cleared"],
-                                  "prev": res["prev"], "job": job}, status=200)
+                                  "prev": res["prev"],
+                                  "passes_removed": res["passes_removed"],
+                                  "manifest_removed": res["manifest_removed"],
+                                  "cursor_removed": res["cursor_removed"],
+                                  "job": job}, status=200)
 
     @routes.post(RESET_ROUTE)
     async def _reset_route(request):
