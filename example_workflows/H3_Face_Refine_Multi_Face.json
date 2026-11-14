@@ -1550,7 +1550,7 @@
       },
       "widgets_values": [
         "<paste the clip's own prompt here>",
-        "match"
+        "max"
       ],
       "title": "Conditioning + EMPTY AV latent - pass B - subject 1"
     },
