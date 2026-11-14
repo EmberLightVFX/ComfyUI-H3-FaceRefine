@@ -365,6 +365,31 @@ function render(d, data, node, name) {
 
     d.head.textContent = "Pairing preview - " + data.job_name + ": " + data.subject_count
         + " subject(s), match frame " + data.match_frame;
+
+    // Run progress + frame-consistency: how many queues are left for the always-next walk, and
+    // whether every saved pass still spans the clip's frame count (a stale/short pass is exactly
+    // what makes H3 Face Stitch throw `index N out of bounds`). Both read off the job folder.
+    const q = data.queue;
+    if (q) {
+        let line = "queues: " + q.total + " total (one per subject)";
+        if (q.complete) line += ", " + q.complete + " done";
+        if (q.remaining) {
+            line += ", " + q.remaining + " still to run";
+            if (q.next_index !== null && q.next_index !== undefined)
+                line += " - next queue takes subject " + q.next_index;
+        } else {
+            line += " - all complete (press Reset run to start the passes over)";
+        }
+        d.body.appendChild(el("p", "h3pp-status", line));
+    }
+    if (data.frames && !data.frames.consistent) {
+        d.body.appendChild(el("p", "h3pp-note h3pp-warn",
+            data.frames_note || ("WARNING - saved passes do not all match the clip's "
+                + data.frames.expected + " frame(s): " + JSON.stringify(data.frames.counts))));
+        d.body.appendChild(button("Reset run (clear pass bookkeeping)", "h3pp-reset",
+            () => { d.close(); resetRun(node); }));
+    }
+
     if (data.reused) {
         const banner = el("p", "h3pp-note h3pp-reused",
             "This job's plan was REUSED on the last H3 Multi-Face Plan run - the node only plans "

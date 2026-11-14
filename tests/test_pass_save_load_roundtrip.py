@@ -71,6 +71,37 @@ def test_subject_minus_one_returns_the_no_previous_clip_for_the_first_subject(pa
     assert "no_previous" in report
 
 
+def test_pass_load_refuses_a_saved_pass_that_is_not_the_clip_length(pack, monkeypatch, tmp_path):
+    """A saved stitched pass shorter than the clip is refused HERE, where the count is known, with
+    the real reason - instead of failing later as an opaque `index N out of bounds` IndexError in
+    H3 Face Stitch when the chain composites onto a base of the wrong length."""
+    plan, _, _, _ = _run(pack, monkeypatch)
+    plan["run"] = dict(plan.get("run") or {}, frames=FRAMES)    # the clip the plan was built on
+    save = pack.NODE_CLASS_MAPPINGS["H3PassSave"]()
+    load = pack.NODE_CLASS_MAPPINGS["H3PassLoad"]()
+    # This subject's pass was rendered from a SHORTER clip than the job now runs on.
+    save.run(plan, 0, "crops", _frames(FRAMES - 1), _transform(FRAMES - 1))
+    save.run(plan, 0, "stitched", _frames(FRAMES - 1), chained_from=-1)
+
+    with pytest.raises(ValueError) as exc:
+        load.run(plan, 0, "stitched")
+    message = str(exc.value)
+    assert "frame(s)" in message and "Reset run" in message
+    assert str(FRAMES - 1) in message and str(FRAMES) in message
+
+
+def test_pass_load_reads_a_pass_that_matches_the_clip(pack, monkeypatch, tmp_path):
+    """The guard only fires on a mismatch: a pass the clip's length reads back unchanged."""
+    plan, _, _, _ = _run(pack, monkeypatch)
+    plan["run"] = dict(plan.get("run") or {}, frames=FRAMES)
+    save = pack.NODE_CLASS_MAPPINGS["H3PassSave"]()
+    load = pack.NODE_CLASS_MAPPINGS["H3PassLoad"]()
+    frames = _frames(FRAMES)
+    save.run(plan, 0, "stitched", frames, chained_from=-1)
+    images, _, _ = load.run(plan, 0, "stitched")
+    assert images.shape[0] == FRAMES
+
+
 def test_subject_minus_one_without_no_previous_wired_refuses(pack, monkeypatch, tmp_path):
     """Asking for the first subject with no `no_previous` base wired is a wiring error, named as
     such rather than reading a pass that does not exist."""

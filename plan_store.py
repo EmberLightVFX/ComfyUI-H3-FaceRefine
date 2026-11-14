@@ -1541,6 +1541,78 @@ def run_counts(plan, job_dir) -> dict:
     }
 
 
+def frame_consistency(plan, job_dir) -> dict:
+    """Are every saved pass the same number of frames as the clip this job is running?
+
+    The pass chain composites each subject onto the PREVIOUS subject's stitched result, and
+    `H3 Face Stitch` pastes each refined crop onto the base frame its tracker recorded it from.
+    That only works while every pass spans the SAME frames as the clip. If the clip changed
+    length between sessions - or a subject was rendered from a differently-cut clip - some saved
+    passes end up shorter than the current tracker, and the stitch indexes a base frame that no
+    longer exists (the classic `index N out of bounds for dimension 0 with size N`).
+
+    The plan's recorded clip length (``plan["run"]["frames"]``) is the authority: a stitched or
+    crops pass whose recorded frame count differs from it cannot be chained with the current run.
+    Returns ``{"expected": int|None, "counts": {subject: int|None}, "distinct": [...],
+    "mismatched": [...], "consistent": bool}``. Read-only.
+    """
+    order = plan_subject_indices(plan)
+    run = (plan or {}).get("run") or {}
+    expected = None
+    try:
+        if run.get("frames"):
+            expected = int(run["frames"])
+    except (TypeError, ValueError):
+        expected = None
+
+    counts = {}
+    for index in order:
+        frames = None
+        for stage in ("stitched", "crops"):     # stitched is the chain's currency; crops backup it
+            rec = manifest_stage_record(job_dir, index, stage) if job_dir else None
+            if isinstance(rec, dict) and rec.get("frames"):
+                try:
+                    frames = int(rec["frames"])
+                    break
+                except (TypeError, ValueError):
+                    frames = None
+        counts[index] = frames
+
+    present = [v for v in counts.values() if v is not None]
+    distinct = sorted(set(present))
+    mismatched = sorted(i for i, v in counts.items()
+                        if expected is not None and v is not None and v != expected)
+    consistent = (len(distinct) <= 1) and (expected is None or not mismatched)
+    return {"expected": expected, "counts": counts, "distinct": distinct,
+            "mismatched": mismatched, "consistent": consistent}
+
+
+def frame_consistency_note(plan, job_dir) -> str:
+    """A one-line, plain-language warning when saved passes disagree with the clip - empty when the
+    job is consistent (or there is nothing saved to disagree). Shared by the plan report and the
+    pairing panel so both tell the same story."""
+    fc = frame_consistency(plan, job_dir)
+    if fc["consistent"] or not fc["mismatched"]:
+        return ""
+    expected = fc["expected"]
+    # Group the offenders by the wrong frame count so the sentence stays short even for 20 subjects.
+    by_count = {}
+    for index in fc["mismatched"]:
+        by_count.setdefault(fc["counts"][index], []).append(index)
+    parts = []
+    for frames, subjects in sorted(by_count.items()):
+        label = ", ".join(str(s) for s in subjects) if len(subjects) <= 6 else \
+            f"{subjects[0]}..{subjects[-1]} ({len(subjects)} subjects)"
+        parts.append(f"subject(s) {label} = {frames} frame(s)")
+    return (f"WARNING - saved passes disagree with the clip ({expected} frames): "
+            + "; ".join(parts)
+            + ". The chain composites each subject onto the previous subject's stitched result, so "
+              "a shorter pass makes H3 Face Stitch index a frame that is not there "
+              "(IndexError). Press Reset run on this node, then re-queue from the FIRST subject so "
+              "every pass is rendered against the current clip; or press Process Plan if the clip "
+              "itself changed and re-queue the whole job.")
+
+
 # ---- the subject-selection cursor -------------------------------------------
 # H3 Subject Select walks the plan one subject per queue. Which subject the walk is
 # sitting on is remembered HERE, in the job folder (the pipeline's memory), so queueing

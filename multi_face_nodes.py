@@ -95,7 +95,9 @@ def _run_progress_line(plan, job) -> str:
         parts.append(f"{counts['remaining']} queue(s) still to run{tail}")
     else:
         parts.append("all complete - press Reset run on this node to start the passes over")
-    return "; ".join(parts)
+    line = "; ".join(parts)
+    warn = plan_store.frame_consistency_note(plan, job)
+    return f"{line}\n{warn}" if warn else line
 
 
 CATEGORY = "MiniMax H3/Face Refine"
@@ -1692,6 +1694,30 @@ class H3PassLoad:
         # One PNG per frame, back in the order the pass was saved. Same converter the subject
         # references use, so a checkpoint reads exactly as it was written.
         images = torch.cat([_read_reference_png(path) for path in files])
+
+        # A pass read from disk has to span the SAME frames the current clip does, or the chain
+        # breaks downstream: H3 Face Stitch pastes each refined crop onto the base frame its
+        # tracker recorded it from, so a shorter saved pass makes it index a base frame that is
+        # not there (`index N out of bounds for dimension 0 with size N`). The plan's recorded
+        # clip length is the authority. Catch it HERE, where the count is known, with the real
+        # reason - rather than letting the frozen stitch node fail with an opaque IndexError.
+        clip_frames = (plan.get("run") or {}).get("frames")
+        try:
+            clip_frames = int(clip_frames) if clip_frames else None
+        except (TypeError, ValueError):
+            clip_frames = None
+        if clip_frames is not None and int(images.shape[0]) != clip_frames:
+            raise ValueError(
+                f"subject {index}'s {stage} pass has {int(images.shape[0])} frame(s), but this "
+                f"job's clip is {clip_frames} frame(s). The pass chain composites each subject "
+                f"onto the previous subject's stitched result and stitches each crop onto the "
+                f"frame it came from, so a pass of a different length than the clip cannot be "
+                f"chained with this run - it makes H3 Face Stitch fail with an IndexError. This "
+                f"happens when the clip changed length (or a subject was rendered from a "
+                f"differently-cut clip) and the older passes were left in the job folder. Press "
+                f"'Reset run' on the H3 Multi-Face Plan node and re-queue from the FIRST subject "
+                f"so every pass is rendered against the current clip, or press 'Process Plan' if "
+                f"the clip itself changed and re-queue the whole job.")
 
         if stage == "crops":
             # A crops stream without its positions is useless, so this raises rather than
