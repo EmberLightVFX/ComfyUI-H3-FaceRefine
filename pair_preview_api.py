@@ -364,6 +364,13 @@ def preview_state(job_name) -> dict:
     state["reused"] = bool(resume.get("reused"))
     state["unapplied"] = [str(line) for line in (resume.get("changed") or [])]
 
+    # The two run-state facts the panel should show: how far through the always-next walk the job
+    # is (so the user knows how many times to queue), and whether every saved pass still spans the
+    # clip's frame count (so a stale/short pass is visible before the chain throws an IndexError).
+    state["queue"] = plan_store.run_counts(plan, job)
+    state["frames"] = plan_store.frame_consistency(plan, job)
+    state["frames_note"] = plan_store.frame_consistency_note(plan, job)
+
     preview = os.path.join(job, plan_store.PREVIEW_FILENAME)
     state["preview_exists"] = os.path.isfile(preview)
     state["preview_url"] = _view_url(root, preview) if state["preview_exists"] else None

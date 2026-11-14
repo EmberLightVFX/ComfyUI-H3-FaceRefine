@@ -271,6 +271,44 @@ def test_reset_run_on_a_missing_job_is_harmless(tmp_path):
     assert ps.reset_run(str(tmp_path / "nope")) == {"cleared": 0, "existed": False}
 
 
+# --- frame_consistency: saved passes must span the clip, or the stitch indexes a missing frame --
+
+def test_frame_consistency_flags_a_pass_shorter_than_the_clip(tmp_path):
+    job = str(tmp_path / "job")
+    plan = _plan(0, 1)
+    plan["run"] = {"frames": 8}                          # the clip this job runs on
+    ps.record_pass_stage(job, 0, "stitched", {"frames": 8})
+    ps.record_pass_stage(job, 1, "stitched", {"frames": 5})   # a stale/short pass
+
+    fc = ps.frame_consistency(plan, job)
+    assert fc["expected"] == 8 and fc["consistent"] is False
+    assert fc["mismatched"] == [1] and fc["counts"] == {0: 8, 1: 5}
+    note = ps.frame_consistency_note(plan, job)
+    assert "WARNING" in note and "Reset run" in note and "5 frame(s)" in note
+
+
+def test_frame_consistency_is_quiet_when_every_pass_matches_the_clip(tmp_path):
+    job = str(tmp_path / "job")
+    plan = _plan(0, 1)
+    plan["run"] = {"frames": 8}
+    for i in (0, 1):
+        ps.record_pass_stage(job, i, "stitched", {"frames": 8})
+    fc = ps.frame_consistency(plan, job)
+    assert fc["consistent"] is True and fc["mismatched"] == []
+    assert ps.frame_consistency_note(plan, job) == ""
+
+
+def test_frame_consistency_says_nothing_when_the_clip_length_is_unknown(tmp_path):
+    """No recorded clip length, so there is no authority to call a pass wrong - no false alarm."""
+    job = str(tmp_path / "job")
+    plan = _plan(0, 1)                                    # no run.frames
+    ps.record_pass_stage(job, 0, "stitched", {"frames": 8})
+    ps.record_pass_stage(job, 1, "stitched", {"frames": 5})
+    fc = ps.frame_consistency(plan, job)
+    assert fc["expected"] is None and fc["mismatched"] == []
+    assert ps.frame_consistency_note(plan, job) == ""
+
+
 def test_the_crop_positions_round_trip_with_the_tracker_s_shapes_back(tmp_path):
     """`crops.json` is readable JSON that a resumed pass can stitch from - including the
     tuples the tracker built, which JSON would otherwise turn back into lists."""
