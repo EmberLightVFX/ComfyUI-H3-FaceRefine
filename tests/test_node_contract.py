@@ -47,11 +47,14 @@ def test_the_pack_init_wires_the_new_node_and_the_new_type():
     assert "WEB_DIRECTORY" in source
 
 
-def test_the_plan_node_s_returns_are_the_plan_a_preview_a_report_and_a_count():
+def test_the_plan_node_s_returns_are_the_plan_a_preview_a_report_a_count_and_a_pick():
     node = m.H3MultiFacePlan
-    assert node.RETURN_TYPES == (m.H3FACEPLAN, "IMAGE", "STRING", "INT")
-    assert node.RETURN_NAMES == ("plan", "preview", "report", "subject_count")
+    # face_pick is the released H3FACEPICK, appended last so an existing saved graph's output
+    # sockets keep their index (only its VALUE is new, never the order of the first four).
+    assert node.RETURN_TYPES == (m.H3FACEPLAN, "IMAGE", "STRING", "INT", m.H3FACEPICK)
+    assert node.RETURN_NAMES == ("plan", "preview", "report", "subject_count", "face_pick")
     assert len(node.RETURN_TYPES) == len(node.RETURN_NAMES)
+    assert m.H3FACEPICK not in m.CUSTOM_TYPES        # only H3FACEPLAN is a new type
     # The preview and the report are meant to be read off the node itself, before anything
     # is queued, so the node is an output node.
     assert node.OUTPUT_NODE is True

@@ -109,7 +109,9 @@ def pack(tmp_path, monkeypatch):
 def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
          excluded="", job_name="group shot", source="union", mode="leave", max_subjects=0,
          crop_factor=None, overrides=""):
-    fake = _FakeModel([_Found(CLIP_BOXES, CLIP_CONFS), _Found(still_boxes, STILL_CONFS)])
+    # The plan node now detects EVERY frame (frames=4 in this fixture) and then the still, so the
+    # fake must answer 4 clip detections (same boxes - the clip tensor is constant) + the still.
+    fake = _FakeModel([_Found(CLIP_BOXES, CLIP_CONFS)] * 4 + [_Found(still_boxes, STILL_CONFS)])
     monkeypatch.setattr(pack.nodes, "_load_detector", lambda name: fake)
     node = pack.NODE_CLASS_MAPPINGS["H3MultiFacePlan"]()
     images = torch.zeros((4, 1000, 1000, 3))
@@ -124,8 +126,11 @@ def _run(pack, monkeypatch, still_boxes=STILL_BOXES, still_size=(2000, 2000),
         tail.append(crop_factor if crop_factor is not None else 2.5)
         if overrides:
             tail.append(overrides)
-    return node.run(images, still, "face_yolov8m.pt", 0.35, 2, source, 0.05, excluded,
-                    max_subjects, job_name, *tail)
+    result = node.run(images, still, "face_yolov8m.pt", 0.35, 2, source, 0.05, excluded,
+                      max_subjects, job_name, *tail)
+    # The plan node also emits a `face_pick` (its 5th output); these fixtures drive the plan and
+    # its report and read the first four. The payload itself is pinned in test_subject_select.py.
+    return result[:4]
 
 
 def test_process_plan_replaces_the_plan_after_clearing_stale_artifacts(pack, monkeypatch, tmp_path):

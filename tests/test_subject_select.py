@@ -271,6 +271,51 @@ def test_the_report_names_the_subject_its_pairing_and_the_shots_it_was_absent_fr
     assert "identity_reference" in report     # ADR 0003: the tracker anchors the subject
 
 
+# --- the plan node's OWN face_pick (so no separate Load Video + Face Select) -------------
+
+def test_the_plan_builds_a_face_pick_in_the_released_shape():
+    """H3 Multi-Face Plan can emit the whole-clip `H3FACEPICK` itself, so a graph is drivable
+    from just the plan + a `Load Image` - no `H3 Load Video + Face Select` node.
+
+    `build_clip_face_pick` must produce EXACTLY the key set `H3FaceSelect` writes and the
+    tracker reads (nodes.py:3353), and the untouched narrowing code must consume it - that is
+    what ADR 0005 means by "the one H3FACEPICK shape"."""
+    payload = _payload()
+    fp = m.build_clip_face_pick(FRAMES, (W, H), "face_yolov8m.pt", 0.35,
+                                payload["boxes"], payload["confs"])
+
+    assert set(fp) == set(payload)                     # verbatim released shape
+    assert fp["frames"] == FRAMES
+    assert fp["src_size"] == (W, H)
+    assert fp["segments"] == [(0, FRAMES)]             # whole clip is one segment (no cut detect)
+    assert len(fp["picks"]) == 1
+    assert fp["picks"][0]["segment"] == [0, FRAMES]
+    assert fp["picks"][0]["absent"] is False
+    assert fp["boxes"] == payload["boxes"]
+    assert fp["confs"] == payload["confs"]
+
+    # A real H3FACEPICK: Subject Select's narrowing locks the right-hand subject onto their own
+    # face across the clip, exactly as a picker-built payload would.
+    plan = _plan(payload)
+    narrowed = m.narrow_pick_to_subject(plan, fp, plan["subjects"][1])
+    assert len(narrowed["picks"]) == 1
+    for pick in narrowed["picks"]:
+        assert _centre(payload, pick["frame"], pick["box"]) > MIDDLE_X
+
+
+def test_a_plan_from_a_lead_in_frame_with_no_faces_marks_the_pick_absent_not_broken():
+    """A clip whose first frame holds no face still yields a valid single-segment payload: the
+    placeholder pick is marked absent rather than pointing at a non-existent box index."""
+    boxes = [[] for _ in range(FRAMES)]
+    confs = [[] for _ in range(FRAMES)]
+    fp = m.build_clip_face_pick(FRAMES, (W, H), "face_yolov8m.pt", 0.35, boxes, confs)
+
+    assert set(fp) == set(_payload())
+    assert fp["picks"][0]["absent"] is True
+    assert fp["picks"][0]["frame"] == -1 and fp["picks"][0]["box"] == -1
+    assert fp["segments"] == [(0, FRAMES)] and fp["frames"] == FRAMES
+
+
 # --- the payload is an input, not a workspace -------------------------------------------
 
 def test_the_input_payload_is_never_touched():

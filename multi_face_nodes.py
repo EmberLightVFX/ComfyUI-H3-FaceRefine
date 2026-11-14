@@ -402,12 +402,55 @@ def _format_report(plan, frames: int, job_dir: str, refs: int, notes) -> str:
     return "\n".join(lines)
 
 
+def build_clip_face_pick(frames, src_size, detector, confidence, boxes, confs) -> dict:
+    """The clip's `H3FACEPICK`, in exactly the shape `H3 Load Video + Face Select` writes (nodes.py:3353).
+
+    The plan node already runs a detector on the clip, so it can carry every frame's boxes
+    onward and spare the graph a separate picker node: plug the image sequence into `images` and
+    the reference frame into `reference_still`, and wire this `face_pick` output into `H3 Subject
+    Select` (and `H3 Face Track + Crop`) - no `H3 Load Video + Face Select` anywhere. The whole
+    sequence is treated as ONE shot segment (this node does no cut detection); the per-frame
+    boxes/confs travel untouched and Subject Select re-points the single pick at each subject in
+    turn, then the released tracker crops from them without detecting.
+
+    The key set matches the released payload verbatim: the tracker reads boxes, confs, segments,
+    picks, frames, src_size, detector and confidence and nothing else, so the remaining keys are
+    informational and mirror what the picker records. `picks` is one placeholder for the single
+    segment - Subject Select replaces it with this subject's own per-segment pick.
+    """
+    n = int(frames)
+    boxes = [list(b) for b in (boxes or [])]
+    confs = [list(c) for c in (confs or [])]
+    present = bool(boxes and boxes[0])
+    return {
+        "version": 1,
+        "boxes": boxes,
+        "confs": confs,
+        "segments": [(0, n)],
+        "picks": [{"segment": [0, n], "frame": 0 if present else -1,
+                   "box": 0 if present else -1, "index": 0, "absent": not present}],
+        "frames": n,
+        "src_size": (int(src_size[0]), int(src_size[1])),
+        "detector": str(detector),
+        "confidence": float(confidence),
+        "select": "rule",
+        "select_index": 0,
+        "rank_by": "left_most",
+        "identity_model": None,
+        "identity_threshold": None,
+        "identity_scores": [],
+    }
+
+
 class H3MultiFacePlan:
     """Decide who the subjects of this job are.
 
     Detects the target clip at the match frame and the reference still, pairs the two
     positionally, and writes the subject plan plus every subject reference crop into the job
-    folder - so no later pass needs the still loaded again.
+    folder - so no later pass needs the still loaded again. It also detects EVERY frame of the
+    clip and emits that per-frame pick payload as a `face_pick` (`H3FACEPICK`) output, so the
+    graph can be driven from just this node + a `Load Image` reference - no separate
+    `H3 Load Video + Face Select` - by wiring `face_pick` into `H3 Subject Select`.
     """
 
     @classmethod
@@ -540,8 +583,8 @@ class H3MultiFacePlan:
 
 
 
-    RETURN_TYPES = (H3FACEPLAN, "IMAGE", "STRING", "INT")
-    RETURN_NAMES = ("plan", "preview", "report", "subject_count")
+    RETURN_TYPES = (H3FACEPLAN, "IMAGE", "STRING", "INT", H3FACEPICK)
+    RETURN_NAMES = ("plan", "preview", "report", "subject_count", "face_pick")
     FUNCTION = "run"
     # The preview and the report exist to be read BEFORE anything is queued, so this is an
     # output node: no preview node has to be wired on to check a pairing. The plan output
@@ -636,7 +679,17 @@ class H3MultiFacePlan:
                 boxes, confs = [], []
             return boxes, confs
 
-        clip_boxes, clip_confs = _detect(images[frame])
+        # Detect EVERY frame of the clip, not just the match frame. The match-frame detection
+        # drives the plan; the whole-clip boxes become the `face_pick` payload this node emits so
+        # the released tracker can crop every subject without a separate Load Video + Face Select
+        # (ADR 0005 keeps it the one H3FACEPICK shape). One detection per frame; ultralytics is
+        # deterministic, so the match-frame boxes here are exactly the boxes the plan pairs on.
+        all_boxes, all_confs = [], []
+        for _f in range(frames):
+            _b, _c = _detect(images[_f])
+            all_boxes.append(_b)
+            all_confs.append(_c)
+        clip_boxes, clip_confs = all_boxes[frame], all_confs[frame]
         still_boxes, still_confs = _detect(still)
         if not clip_boxes and not still_boxes:
             raise ValueError(
@@ -782,7 +835,11 @@ class H3MultiFacePlan:
 
         report = _format_report(plan, frames, job, refs,
                                 notes + [_run_progress_line(plan, job), f"plan: {written}"])
-        return (plan, preview, report, int(plan["subject_count"]))
+        # The whole-clip pick, in the released H3FACEPICK shape, so the graph needs no separate
+        # Load Video + Face Select: wire this into H3 Subject Select's (and the tracker's) face_pick.
+        face_pick = build_clip_face_pick(frames, (width, height), detector, confidence,
+                                         all_boxes, all_confs)
+        return (plan, preview, report, int(plan["subject_count"]), face_pick)
 
 
 # ----------------------------------------------------------------------------

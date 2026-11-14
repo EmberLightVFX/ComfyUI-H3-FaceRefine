@@ -1038,7 +1038,7 @@ subject, so it has to be visible at the node that made it.
 
 | Input | Default | What it does |
 |---|---|---|
-| `images` | - | The **target clip**, as an `IMAGE` batch — from **H3 Load Video + Face Select** or VideoHelperSuite. This node does not load video. |
+| `images` | - | The **target clip**, as an `IMAGE` batch — from any Load Video / VideoHelperSuite / Load-Images node. The node detects it (the match frame for the plan, every frame for the `face_pick` output), so no separate face-picker upstream is needed. This node does not decode video itself. |
 | `reference_still` | - | One high-quality image of the same scene, framed the same way as the clip. Its faces supply the detail. Only the first image of a batch is used, and if the batch holds more than one the report says which was paired. |
 | `detector` | `face_yolov8m.pt` | The detector used on **both** plates, so the two sets of boxes mean the same thing. Same list as the other nodes here. |
 | `confidence` | `0.35` | The detector's score floor, applied to both plates. Lower finds small and turned faces on both. |
@@ -1060,6 +1060,9 @@ subject, so it has to be visible at the node that made it.
 | `preview` | both plates side by side at the match frame, every face numbered, subjects outlined in their palette colour, excluded faces slashed red, faces with no partner marked. Wire it to any image viewer, or read it off the node. |
 | `report` | printed on the node: who is in the job, what it costs, what was written where, every decision the plan made about faces it could not pair, and a **passes** line for a job that has started — how many subjects (queues) are still to run and which subject the next queue takes. |
 | `subject_count` | how many passes this job is — the number of queues a fresh job takes (found faces minus the ignored ones). Wire it anywhere you want the number, and check it against the cost line before queueing. |
+| `face_pick` | the whole clip as an `H3FACEPICK` — every frame's face boxes and confidences, the whole sequence treated as one shot segment (this node does no cut detection). Because the plan node runs the detector anyway, it can carry the per-frame boxes onward, so **`H3 Subject Select` and `H3 Face Track + Crop` can take their `face_pick` from here instead of from `H3 Load Video + Face Select`** — drive the whole job from just `images` + a `Load Image` reference, with no picker node. Single-shot clips are the natural fit; a clip with cuts is still tracked across them, but the whole sequence is presented as one segment. |
+
+**Plugging in directly (no `H3 Load Video + Face Select`):** wire your image sequence (a Load Video / VideoHelperSuite / Load-Images batch) into `images` and the reference frame into `reference_still`, set `match_frame` (default `0`), and wire this node's `face_pick` into `H3 Subject Select` (and the tracker). This is the same `H3FACEPICK` shape the picker emits, so every released pass node runs unchanged.
 
 **Buttons on the node:** **Process Plan** wipes the whole job and re-plans it from scratch — it clears the plan (kept once as `plan_prev.json`), the preview and crops, `manifest.json`, the subject walk, and the **entire `passes/` tree**, so every subject is re-rendered against the new pairing. This is **destructive** (it deletes completed renders) and the panel asks you to confirm first. It is the right move after changing the pairing or the clip, since passes saved under a different subject set would otherwise break the chain. **Pairing preview** opens the read-only panel over the job folder. **Reset run** clears only the **pass bookkeeping** (the manifest's pass records and the subject walk) so the always-next walk starts over at the first subject — it pops a note saying how many completed passes it cleared, and never touches `plan.json`, the references, the preview or the saved pass frames (a re-run simply overwrites its own frames).
 
@@ -1280,7 +1283,7 @@ starts the whole job over from the first subject.
 | Input | Default | What it does |
 |---|---|---|
 | `plan` | - | The subject plan from **H3 Multi-Face Plan**: who the subjects are, which face in the clip each one is, which face in the still became their subject reference, and whether they were paired at all. It records the match frame's boxes only, so it cannot name this subject in the other shots on its own — that is what `face_pick` is for. |
-| `face_pick` | - | The clip's own pick payload, from the same **H3 Load Video + Face Select** the images come from: every frame's boxes, confidences and shot boundaries. Its picks are replaced with this subject's; the boxes pass through untouched. **Do not resize, crop or trim between the loader and this node** — every box would land in the wrong place. |
+| `face_pick` | - | The clip's own pick payload: every frame's boxes, confidences and shot boundaries. Wire it from **H3 Multi-Face Plan's `face_pick` output** (the whole sequence as one segment — no picker node needed) or from **H3 Load Video + Face Select** (which cuts shots). Its picks are replaced with this subject's; the boxes pass through untouched. **Do not resize, crop or trim between the source and this node** — every box would land in the wrong place. |
 
 **Outputs**
 
