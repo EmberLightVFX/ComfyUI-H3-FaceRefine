@@ -430,6 +430,9 @@ branch per person.
    input. The Composite refuses until every subject's stitched stage has landed, so it raises on
    every queue but the last — the completion gate, not a failure: the pass it waited on is already
    saved, so the next queue resumes where you left off, and the final queue writes the clip.
+   Keep **Batch count = 1** — it is *not* the number of people to refine; each separate **Queue
+   Prompt** advances the walk by one subject. (Subject Select re-reads the job's pass manifest on
+   every queue, so a finished pass hands off the next subject instead of repeating the first.)
 5. **Interrupted?** Queue again with nothing changed: `subject = next` takes the first subject with
    no completed **stitched** pass recorded in the job folder.
 

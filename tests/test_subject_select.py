@@ -12,6 +12,7 @@ locks onto, and the bookkeeping (`next`) that picks the subject at all.
 
 import copy
 import json
+import math
 import os
 
 import pytest
@@ -566,4 +567,32 @@ def test_when_every_pass_is_saved_the_walk_points_at_reset_run(monkeypatch, tmp_
         node.run(plan, "PICK")
     assert "already has a completed pass" in str(exc.value)
     assert "Reset run" in str(exc.value)
+
+
+# --- the pass-walk cache invalidation (#stalled-walk) ----------------------------------------
+
+def test_the_subject_walk_signature_moves_when_a_pass_is_recorded(tmp_path):
+    """IS_CHANGED keys on the job's manifest + cursor so a completed pass busts Subject Select's
+    ComfyUI output cache; this pure signature must move exactly when those files change, and stay
+    put otherwise so an unrelated queue keeps the walk cached."""
+    job = str(tmp_path / "job")
+    os.makedirs(job)
+    sig0 = m._subject_walk_signature(job)                       # nothing written yet
+    assert "none" in sig0                                       # manifest and cursor both absent
+    ps.record_pass_stage(job, 0, "stitched", {"frames": 1})     # subject 0 done -> manifest born
+    sig1 = m._subject_walk_signature(job)
+    assert sig1 != sig0
+    ps.record_pass_stage(job, 1, "stitched", {"frames": 1})     # next queue's walk advanced again
+    sig2 = m._subject_walk_signature(job)
+    assert sig2 != sig1
+    assert m._subject_walk_signature(job) == sig2               # stable while untouched
+
+
+def test_subject_select_invalidates_its_cache_for_the_pass_walk():
+    """The pass nodes had NO IS_CHANGED (only the plan node did), so the walk stalled on subject 0.
+    Subject Select must carry one, and a plan with no job folder must return NaN so run() still runs
+    and names the missing job itself rather than being silently cached."""
+    assert hasattr(m.H3SubjectSelect, "IS_CHANGED")
+    assert math.isnan(m.H3SubjectSelect.IS_CHANGED())                    # no plan -> run()
+    assert math.isnan(m.H3SubjectSelect.IS_CHANGED(plan={"subjects": []}))  # plan records no job
 
