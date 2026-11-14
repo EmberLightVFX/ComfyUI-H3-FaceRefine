@@ -316,6 +316,25 @@ def test_a_plan_from_a_lead_in_frame_with_no_faces_marks_the_pick_absent_not_bro
     assert fp["segments"] == [(0, FRAMES)] and fp["frames"] == FRAMES
 
 
+def test_the_clip_thumb_is_cut_at_the_crop_factor_not_a_tight_pad():
+    """The clip-face thumb must frame the subject at the job's crop_factor - the same framing the
+    reference thumb uses - or it reads as far more zoomed in than the reference beside it."""
+    box, W, H = [100.0, 100.0, 140.0, 140.0], 1000, 1000      # a 40px-tall face
+    for factor in (1.5, 2.5, 4.0):
+        crop = m._clip_crop_rect(box, W, H, factor)
+        tx, ty, tw, th = ps.tracker_rect(box, (W, H), factor)   # the reference's geometry
+        assert crop == [int(round(tx)), int(round(ty)),
+                        int(round(tx + tw)) - int(round(tx)),
+                        int(round(ty + th)) - int(round(ty))]
+        # ~crop_factor * face height tall - NOT the old face-box + 20% pad (~1.4x the face):
+        assert abs(crop[3] - 40.0 * factor) <= 2
+        assert crop[3] > 40.0 * 1.4
+    # No crop_factor passed falls back to the shipped default, so a bare call matches it.
+    assert m._clip_crop_rect(box, W, H) == m._clip_crop_rect(box, W, H, ps.DEFAULT_CROP_FACTOR)
+    # A degenerate (zero-height) detection collapses to None rather than a bad slice.
+    assert m._clip_crop_rect([50.0, 50.0, 50.0, 50.0], 100, 100, 2.5) is None
+
+
 # --- the payload is an input, not a workspace -------------------------------------------
 
 def test_the_input_payload_is_never_touched():
