@@ -99,6 +99,11 @@ def _subject_walk_note(plan, job, current, mode, legacy):
         tail = f"  (before the first subject {lo})"
     note = (f"you are on subject {current} of {total}   mode {mode}: after this queue the "
             f"subject value {verb} {nxt}{tail}")
+    if mode == SUBJECT_MODE_INCREMENT:
+        # The chained model only moves on once this subject's stitched pass is on record, so a
+        # queue that dies mid-pass is retried rather than left behind by the cursor.
+        note += f"   (subject {current} is taken again until its pass is saved - so a failed " \
+                f"queue heals itself instead of advancing past it)"
     if done:
         note += f"\n   recorded complete: subject(s) {', '.join(str(i) for i in done)}"
     return note
@@ -1294,20 +1299,39 @@ class H3SubjectSelect:
         else:
             seed = int(subject)
             state = plan_store.read_subject_cursor(job) if job else None
-            if state is not None and state["seed"] == seed:
-                current = state["cursor"]                       # continue the stored walk
-            elif state is None and seed == 0 and job and plan_store.completed_subjects(plan, job):
-                resumed = plan_store.next_subject(plan, job)     # new walk: resume past done passes
-                current = int(resumed["index"]) if resumed is not None else seed
-            else:
-                current = seed                                  # a jump, or a brand-new job
+            walking = state is not None and state["seed"] == seed   # same value re-queued = continue
+
+            if mode == SUBJECT_MODE_FIXED:
+                current = seed                                      # hold this subject, re-run it
+            elif mode == SUBJECT_MODE_DECREMENT:
+                current = state["cursor"] if walking else seed      # step back through the plan
+            else:  # INCREMENT: chained-safe - never run a subject whose earlier pass is unsaved.
+                order = plan_store.plan_subject_indices(plan)
+                opened = plan_store.next_subject(plan, job) if job else None
+                first_open = None if opened is None else int(opened["index"])
+                if walking:
+                    # Continued walk: a queue that crashed mid-pass (after this node advanced the
+                    # cursor) is retried, not skipped, so the chain never composites onto a subject
+                    # that was never run - snap back to the earliest subject still missing a pass.
+                    intended = state["cursor"]
+                    if first_open is None:
+                        current = order[-1] if order else seed    # every pass done: stay on the last
+                    elif intended in order and order.index(intended) > order.index(first_open):
+                        current = first_open
+                    else:
+                        current = intended
+                elif state is None and seed == 0 and job and first_open is not None:
+                    current = first_open                         # brand-new job: resume past done
+                else:
+                    current = seed                               # an explicit jump: honor the number
+
             chosen = _subject_at_index(plan, current)
             if chosen is None:
                 raise ValueError(
                     f"subject {current} is not one this plan holds. Its subjects are "
                     f"{', '.join(str(int(s['index'])) for s in (plan.get('subjects') or []))}."
                 )
-            if job:   # remember the walk, and where the value lands after this run
+            if job:   # remember where the walk stands; Increment's re-snap makes it self-healing
                 plan_store.write_subject_cursor(job, current + SUBJECT_MODE_STEP[mode], seed)
 
         narrowed = narrow_pick_to_subject(plan, face_pick, chosen)
