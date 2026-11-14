@@ -81,6 +81,35 @@ def test_clear_plan_artifacts_reports_a_missing_job_folder(tmp_path):
         "existed": False, "cleared": [], "prev": None}
 
 
+def test_clear_job_for_replace_wipes_the_plan_manifest_cursor_and_every_pass(tmp_path):
+    """Process Plan now clears the WHOLE job - plan artifacts, manifest, subject cursor and the
+    entire passes/ tree - so a re-plan is a true fresh start (only one plan_prev.json is kept)."""
+    job = _seed_job(tmp_path)
+    ps.write_subject_cursor(job, 5, 2)
+
+    res = ps.clear_job_for_replace(job)
+
+    assert res["existed"] is True and res["prev"] == ps.PLAN_PREV_FILENAME
+    assert res["passes_removed"] == 1 and res["manifest_removed"] is True
+    assert res["cursor_removed"] is True
+    # The old plan survives once, as a safety copy; everything else the pipeline wrote is gone.
+    with open(os.path.join(job, ps.PLAN_PREV_FILENAME), encoding="utf-8") as fh:
+        assert fh.read() == "OLD"
+    assert not os.path.isfile(ps.plan_path(job))
+    assert not os.path.isdir(os.path.join(job, "passes"))
+    assert not os.path.isfile(os.path.join(job, "manifest.json"))
+    assert not os.path.isfile(ps.subject_cursor_path(job))
+    # A stray non-pipeline file is not the job's data to delete; it survives.
+    assert os.path.isfile(os.path.join(job, "subject_notes.txt"))
+
+
+def test_clear_job_for_replace_reports_a_missing_job_folder(tmp_path):
+    res = ps.clear_job_for_replace(os.path.join(str(tmp_path), "nope"))
+    assert res["existed"] is False and res["cleared"] == [] and res["prev"] is None
+    assert res["passes_removed"] == 0 and res["manifest_removed"] is False
+    assert res["cursor_removed"] is False
+
+
 # --- re-running the plan node: the reuse flag and the unapplied-change summary ----------------
 
 def _two_plans(excluded=()):

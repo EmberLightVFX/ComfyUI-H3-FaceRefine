@@ -349,8 +349,8 @@ function render(d, data, node, name) {
     d.foot.innerHTML = "";
     d.foot.appendChild(el("span", "h3pp-msg",
         "toggles edit the node's excluded_faces widget; click a face image to re-pair it (writes "
-        + "pair_overrides). Process Plan re-runs the node into job_name and REPLACES its plan (the "
-        + "previous plan.json is kept as plan_prev.json)"));
+        + "pair_overrides). Process Plan WIPES the whole job (the plan AND every saved pass, crops "
+        + "+ stitched) and re-plans from scratch - it deletes completed renders; the old plan is kept once as plan_prev.json"));
     const refresh = button("Refresh", "", () => { d.close(); openPanel(node, name); });
 
     if (!data.ready) {
@@ -646,6 +646,39 @@ async function processPlan(node) {
     const wd = w(node, "job_name");
     const name = wd ? String(wd.value === null || wd.value === undefined ? "" : wd.value).trim() : "";
     const d = dialog("Process Plan" + (name ? " - " + name : ""));
+
+    // Process Plan now wipes the WHOLE job - the plan AND every saved pass (crops + stitched) - so
+    // the plan node re-plans from scratch, as if the job never ran. That deletes completed renders,
+    // so when a job exists we warn (with how many passes are on the line) and confirm first.
+    if (name) {
+        let done = 0;
+        try {
+            const st = await (await fetch(api.apiURL(ROUTE) + "?job_name="
+                + encodeURIComponent(name))).json().catch(() => ({}));
+            if (st && st.queue) done = st.queue.complete || 0;
+        } catch (e) { /* nothing to report - still allow the wipe */ }
+        const countNote = done > 0
+            ? " This job has " + done + " completed pass" + (done === 1 ? "" : "es")
+              + " (saved render" + (done === 1 ? "" : "s") + ") that will be DELETED."
+            : "";
+        d.head.textContent = "Process Plan - wipe this job and start over?";
+        d.body.textContent = "Process Plan clears EVERYTHING this job ever wrote - the plan, the "
+            + "preview, and every saved pass (crops + stitched) - so the plan node re-plans from "
+            + "scratch, as if the job never ran. Re-pairing changes who the subjects are, so the "
+            + "old passes cannot be kept safely." + countNote + " This cannot be undone (the old "
+            + "plan is kept once as plan_prev.json). Afterwards the plan node writes a fresh plan; "
+            + "queue the graph again to render each subject from the first.";
+        d.foot.innerHTML = "";
+        const confirmed = await new Promise((resolve) => {
+            d.foot.appendChild(button("Cancel", "", () => { d.close(); resolve(false); }));
+            d.foot.appendChild(button("Process Plan - wipe everything", "h3pp-danger",
+                () => resolve(true)));
+        });
+        if (!confirmed) return;
+        d.head.textContent = "Process Plan" + (name ? " - " + name : "");
+        d.body.textContent = "";
+        d.foot.innerHTML = "";
+    }
     d.msg.textContent = "building a plan-only prompt from the current settingsâ€¦";
 
     let built;
