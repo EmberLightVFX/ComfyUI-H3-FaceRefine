@@ -330,6 +330,19 @@ def test_a_multi_face_graph_that_wires_ref_audio_is_caught():
     assert "ref_audios.ref_audio_0" in problems[0].message
 
 
+def test_the_multi_face_flow_bypasses_the_audio_lock():
+    """The multi-face flow discards H3's generated audio (the clip's audio comes from the target
+    clip at assembly), so MiniMaxH3NativeAudioLock does nothing useful here - and on a SILENT
+    source clip its audio-VAE encode crashes ("padded input (6) < kernel 7"). The multi-face
+    template ships it bypassed (ComfyUI node mode 2). Single-face templates keep it active
+    (different flow, real-audio sources)."""
+    multi = _load("H3_Face_Refine_Multi_Face.json")
+    locks = [n for n in multi["nodes"] if n.get("type") == "MiniMaxH3NativeAudioLock"]
+    assert locks, "expected the multi-face template to carry the audio-lock node"
+    assert all(n.get("mode", 0) == 2 for n in locks), \
+        "the multi-face template must ship MiniMaxH3NativeAudioLock bypassed (mode 2)"
+
+
 def test_the_single_face_templates_are_left_alone_by_the_ref_audio_rule():
     """The single-face Auto/Manual templates deliberately wire reference audio (a different audio
     contract, real-audio sources). With no multi-face node present, the rule must not fire there."""
