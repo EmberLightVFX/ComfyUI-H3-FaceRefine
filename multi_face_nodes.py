@@ -558,6 +558,43 @@ class H3MultiFacePlan:
     OUTPUT_NODE = True
     CATEGORY = CATEGORY
 
+    @classmethod
+    def IS_CHANGED(cls, job_name="", **kwargs):
+        """Decide whether ComfyUI may reuse this node's cached output.
+
+        ``run()`` writes ``plan.json`` as a SIDE EFFECT, and ComfyUI's output cache skips
+        ``run()`` entirely whenever a node's inputs are unchanged. The pairing panel's
+        **Process Plan** button therefore cannot re-plan into the same ``job_name``: its
+        ``/replace`` route deletes ``plan.json``, the plan node's inputs are otherwise
+        identical, so the cached output is served back and no fresh plan is ever written -
+        the panel then reports "no plan yet".
+
+        Keying the cache signature on the plan file's presence busts that deadlock:
+
+        - an ordinary queue (``plan.json`` on disk, inputs unchanged) returns a stable value
+          and stays cached, so the per-subject pass chain never re-detects;
+        - a plan that has been cleared by Process Plan, or not written yet, returns ``NaN``
+          (which never equals itself), forcing ``run()`` so the plan node writes a fresh plan;
+        - a blank ``job_name`` derives its folder from the images, which IS_CHANGED is not
+          handed reliably (ComfyUI guarantees only constants here), so it re-plans too - the
+          reuse branch in ``run()`` keeps an already-planned job non-destructive.
+
+        A changed widget still re-runs the node through the normal input-hash path: IS_CHANGED
+        only adds invalidation, it never suppresses it, so the pairing-fingerprint guard and
+        the "your settings differ, NOT applied" notice stay exactly as before.
+        """
+        name = str(job_name if job_name is not None else "").strip()
+        if not name:
+            return float("nan")
+        try:
+            import folder_paths
+            job = plan_store.job_dir_for(folder_paths.get_output_directory(), name)
+            if not os.path.isfile(plan_store.plan_path(job)):
+                return float("nan")   # cleared or unwritten -> run() so a plan is (re)written
+        except Exception:
+            return float("nan")        # cannot locate the folder -> re-plan; run() re-derives
+        return 0
+
     def run(self, images, reference_still, detector, confidence, match_frame,
             subject_source, match_tolerance, excluded_faces, max_subjects, job_name,
             unmatched_faces=plan_store.DEFAULT_UNMATCHED_FACES,
