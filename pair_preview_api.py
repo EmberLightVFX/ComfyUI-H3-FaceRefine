@@ -42,6 +42,7 @@ folder shows a pairing that the render in front of it may be about to invalidate
 """
 
 import os
+import time
 import urllib.parse
 
 try:  # loaded as part of the pack
@@ -104,12 +105,26 @@ def _view_url(root: str, path: str) -> str:
     folder and the bare file name as SEPARATE query params - a subpath crammed inside ``filename``
     404s - so split at the last forward slash and quote each half. That also lets a job-name folder
     which itself contains a space resolve, since the space survives as ``%20`` in ``subfolder``.
+
+    A ``v=<mtime_ns>-<size>`` token rides along so a re-plan that rewrites a crop under the SAME
+    name (subject_N.png / clip_N.png / pairing_preview.png never change name) makes the URL change,
+    so the browser refetches the new pixels instead of reusing the last run's cached image - which
+    is what made a re-planned job still show the previous detector's faces in the panel. The token
+    is stable while the file is untouched, so unchanged crops still benefit from caching.
     """
     rel = os.path.relpath(str(path), str(root))
     rel = rel.replace(os.sep, "/").replace("\\", "/")
     head, _, base = rel.rpartition("/")
-    return ("/view?type=output&subfolder=" + urllib.parse.quote(head)
-            + "&filename=" + urllib.parse.quote(base))
+    url = ("/view?type=output&subfolder=" + urllib.parse.quote(head)
+           + "&filename=" + urllib.parse.quote(base))
+    try:
+        st = os.stat(path)
+        url += f"&v={int(st.st_mtime_ns)}-{int(st.st_size)}"
+    except OSError:
+        # File vanished between the exists check and the stat: bust anyway rather than risk a
+        # stale cached image, with a token that changes every call.
+        url += "&v=" + str(int(time.time() * 1000))
+    return url
 
 
 def _face_number(value):

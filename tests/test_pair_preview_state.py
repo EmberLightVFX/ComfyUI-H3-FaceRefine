@@ -98,6 +98,28 @@ def test_the_state_points_at_comfyui_s_own_view_route_for_the_images(pack, monke
     assert state["preview_exists"] is True
 
 
+def test_a_rewritten_crop_gets_a_new_view_url_not_a_cached_one(pack, monkeypatch, tmp_path):
+    """subject_N.png keeps its name across a re-plan, so handing the browser the same URL twice
+    makes it show the previous detector's face from cache - the reason a face->person re-plan still
+    looked like faces. The /view URL carries a version token that moves only when the file moves."""
+    _run(pack, monkeypatch)
+    api = pack.pair_preview_api
+    before = api.preview_state("group shot")["subjects"][0]["ref_url"]
+    assert "&v=" in before
+
+    # Untouched file -> the exact same URL, so the browser may still cache it (not a random token).
+    assert api.preview_state("group shot")["subjects"][0]["ref_url"] == before
+
+    # Re-write the crop the way a re-plan does: same name, different content and time.
+    crop = _job(tmp_path, "group shot") / "subject_0.png"
+    crop.write_bytes(crop.read_bytes() + b"\x00")      # new size + new mtime_ns, same name
+
+    after = api.preview_state("group shot")["subjects"][0]["ref_url"]
+    assert after != before
+    # Only the version token moved; the path/params a browser keys on stay put.
+    assert after.split("&v=")[0] == before.split("&v=")[0]
+
+
 def test_the_state_carries_the_pairing_inputs_the_panel_shows(pack, monkeypatch):
     """Match frame, source, tolerance, unmatched_faces, max_subjects: read back out of the
     plan, not re-read off the node's widgets, so the panel shows what the job actually was."""
