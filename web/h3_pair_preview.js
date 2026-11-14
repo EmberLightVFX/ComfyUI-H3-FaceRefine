@@ -8,17 +8,17 @@ import { api } from "../../scripts/api.js";
 // already decides it and already draws both plates with every face outlined and numbered; this
 // panel reads that decision back out of the job folder over one JSON route and shows it.
 //
-// The panel is read off the job folder and never authors a pairing. The ONE thing it can change on
-// the node is its own `excluded_faces` widget, through a per-face include/ignore toggle - the
-// single sanctioned control for switching a face off. "Process Plan" then re-runs the plan node
-// into job_name and REPLACES the plan: to let that overwrite past the pairing-fingerprint guard it
-// first clears the plan node's OWN stale artifacts (plan.json -> plan_prev.json, plus the preview
-// and the subject/clip crops) over one narrow, render-guarded route. The panel itself never writes
-// a plan, crop, pairing or pass stage, and pass stages (manifest.json, passes/) are left for the
-// pass/composite nodes' own guards. The panel can also re-point one face's partner to another face
-// (manual pairing) by writing the node's `pair_overrides` widget - the node still re-decides the
-// whole pairing when Process Plan runs, so the panel is never a second source of truth. The
-// panel is its own front end, separate from the face picker's, so the picker stays untouched.
+// The panel is read off the job folder and never authors a pairing. What it CAN change on the node
+// is two typed widgets, through a per-face include/ignore toggle (its own `excluded_faces`) and a
+// click-to-re-pair editor (its `pair_overrides`). Both edits are PENDING: they write the widget and
+// mark the node dirty, but do not re-plan by themselves. One button - **Apply**, in the panel's foot
+// - commits them: it re-runs the plan node into job_name (the same path as the node's Process Plan
+// button), which WIPES the whole job (plan AND every saved pass, crops + stitched) and re-plans from
+// scratch, because re-pairing renumbers the subject set so the old passes cannot be kept. Applying
+// deletes completed renders, so it confirms first (naming how many passes go). The panel itself never
+// writes a plan, crop, pairing or pass stage; the plan node, never the panel, decides the pairing, so
+// the panel is never a second source of truth. The panel is its own front end, separate from the face
+// picker's, so the picker stays untouched.
 //
 // It does keep the picker's one rule: while a prompt is running it refuses. The reason here is
 // not GPU contention but that the job folder it reads is the one that render is writing into, so
@@ -87,6 +87,8 @@ function styleOnce() {
         ".h3pp-thumb.clickable:hover .h3pp-crop{border-color:#e0c060}",
         ".h3pp-thumb.clickable:hover .h3pp-nocrop{border-color:#e0c060}",
         ".h3pp-hint{font:11px sans-serif;color:#7aa0c8;margin-top:2px;text-align:center}",
+        ".h3pp-apply{font:13px sans-serif;font-weight:600;color:#fff;background:#2f7d32;",
+        "  border:1px solid #3f9d42;border-radius:5px;padding:6px 14px;cursor:pointer}",
         ".h3pp-reused{color:#8fb4d8}",
         ".h3pp-warn{color:#e0c060;font-weight:600}",
         ".h3pp-sub{font:12px sans-serif;color:#e0c060;margin:2px 0 0 14px}",
@@ -331,8 +333,9 @@ function openFaceChooser(node, data, faceToken, candidates, currentToken, title,
     const g = dialog(title);
     g.body.appendChild(el("p", "h3pp-note",
         "Pick which face to use for this side, or no partner. This writes the node's pair_overrides "
-        + "widget and re-plans the job right away (a quick detect + pair, no render) - it renumbers "
-        + "the subject set, so it clears completed passes and asks you to confirm first."));
+        + "widget (pending). Press Apply at the bottom of the panel to commit it - Apply re-plans the "
+        + "job (a quick detect + pair, no render), renumbers the subject set, and clears completed "
+        + "passes, so it asks you to confirm first."));
     const grid = el("div", "h3pp-facegrid");
     for (const f of (candidates || [])) {
         grid.appendChild(faceCell(f, currentToken, () => { g.close(); apply(faceToken, f.token); }));
@@ -348,9 +351,9 @@ function render(d, data, node, name) {
     d.body.innerHTML = "";
     d.foot.innerHTML = "";
     d.foot.appendChild(el("span", "h3pp-msg",
-        "toggles edit the node's excluded_faces widget; click a face image to re-pair it (writes "
-        + "pair_overrides). Process Plan WIPES the whole job (the plan AND every saved pass, crops "
-        + "+ stitched) and re-plans from scratch - it deletes completed renders; the old plan is kept once as plan_prev.json"));
+        "Toggles switch a face off / re-pair it on the node's widgets (pending). Apply commits "
+        + "them: it re-plans the job (detect + pair, no render) and WIPES every saved pass (crops + "
+        + "stitched), so it confirms first; the old plan is kept once as plan_prev.json"));
     const refresh = button("Refresh", "", () => { d.close(); openPanel(node, name); });
 
     if (!data.ready) {
@@ -401,8 +404,8 @@ function render(d, data, node, name) {
             d.body.appendChild(el("p", "h3pp-note h3pp-warn",
                 "Your node settings differ from the saved plan, so they were NOT applied to that "
                 + "run (it reused the saved subject set to keep the existing passes valid). Press "
-                + "Process Plan to apply them (the passes must then be re-run), or use a new "
-                + "job_name. What differs:"));
+                + "Apply below (or Process Plan) to apply them - the passes must then be re-run - "
+                + "or use a new job_name. What differs:"));
             for (const line of pending) d.body.appendChild(el("p", "h3pp-sub h3pp-warn", line));
         }
     }
@@ -462,25 +465,21 @@ function render(d, data, node, name) {
             const off = tokenSet.has(tok);
             if (off) row.classList.add("off");
             cell.appendChild(button(off ? "Include this face again" : "Ignore this face",
-                "h3pp-toggle", () => processPlan(node, {
-                    reason: "You changed which faces this job refines - " +
-                        (off ? "including " : "ignoring ") + tokenLabel(tok) + ".",
-                    applyLabel: "Apply - re-plan now",
-                    before: () => applyExclude(node, tok, !off),
-                    onConfirmed: () => d.close(),
-                })));
+                "h3pp-toggle", () => {
+                    applyExclude(node, tok, !off);
+                    render(d, data, node, name);
+                    d.msg.textContent = "Pending - press Apply to commit these changes to the job.";
+                }));
         }
         // Click either face image to re-pick that side. The clip image re-points the clip side of
         // the still face this subject tracks (face token s<still>); the reference image re-points
         // the reference of the clip face this subject tracks (face token <clip>). A side with no
         // partner on the other plate to re-point is left non-clickable.
-        const applyPick = (faceTok, tok) => processPlan(node, {
-            reason: "You re-paired a face in this job (a manual pairing over-rides the "
-                + "automatic match).",
-            applyLabel: "Apply - re-plan now",
-            before: () => applyPairOverride(node, faceTok, tok),
-            onConfirmed: () => d.close(),
-        });
+        const applyPick = (faceTok, tok) => {
+            applyPairOverride(node, faceTok, tok);
+            render(d, data, node, name);
+            d.msg.textContent = "Pending - press Apply to commit these changes to the job.";
+        };
         const canClip = (s.still_face !== null && s.still_face !== undefined);
         const canRef = (s.clip_face !== null && s.clip_face !== undefined);
         const curClip = (s.clip_face === null || s.clip_face === undefined) ? null : String(s.clip_face);
@@ -512,17 +511,16 @@ function render(d, data, node, name) {
     }
     if (offTokens.length) {
         d.body.appendChild(el("h4", "h3pp-sect",
-            "switched off in this job - they keep their original pixels. Restore re-plans the "
-            + "job to bring one back in (that clears completed passes)"));
+            "switched off (the excluded_faces widget) - they keep their original pixels. Restore "
+            + "brings one back into the widget (pending); press Apply to commit it."));
         const wrap = el("div", "h3pp-chips");
         for (const t of offTokens) {
             wrap.appendChild(el("span", "h3pp-chip off", tokenLabel(t)));
-            wrap.appendChild(button("Restore", "h3pp-toggle", () => processPlan(node, {
-                reason: "You restored face " + tokenLabel(t) + " back into this job's subjects.",
-                applyLabel: "Apply - re-plan now",
-                before: () => applyExclude(node, t, false),
-                onConfirmed: () => d.close(),
-            })));
+            wrap.appendChild(button("Restore", "h3pp-toggle", () => {
+                applyExclude(node, t, false);
+                render(d, data, node, name);
+                d.msg.textContent = "Pending - press Apply to commit these changes to the job.";
+            }));
         }
         d.body.appendChild(wrap);
     }
@@ -536,6 +534,35 @@ function render(d, data, node, name) {
         d.body.appendChild(chips(data.capped_out, "warn", (f) => f.pairing));
     }
 
+    // Pending = the node's widgets now differ from what the saved plan was made with. Exclusions
+    // compare the widget tokens to the plan's recorded excluded_faces; re-pairs compare the widget's
+    // pair_overrides to the plan's. Both edits stay on the node (pending) until Apply re-plans.
+    const planExcl = new Set((data.excluded_faces || []).map((t) => String(t)));
+    const curExcl = new Set(widgetTokens);
+    let changes = 0;
+    for (const t of curExcl) if (!planExcl.has(t)) changes++;
+    for (const t of planExcl) if (!curExcl.has(t)) changes++;
+    const curOvr = new Set(((pairOverrideTokens(node) || {}).tokens) || []);
+    const planOvr = new Set((data.pair_overrides || []).map((t) => String(t).trim()));
+    for (const t of curOvr) if (!planOvr.has(t)) changes++;
+    for (const t of planOvr) if (!curOvr.has(t)) changes++;
+    if (changes) {
+        d.body.appendChild(el("p", "h3pp-note h3pp-warn",
+            changes + " unapplied change(s) on the node's widgets. Press Apply to commit them to the "
+            + "job: it re-plans and clears every completed pass (the subject set renumbers, so the "
+            + "old renders cannot be kept). It confirms first."));
+    }
+
+    d.foot.appendChild(button(
+        changes ? "Apply (" + changes + " change" + (changes === 1 ? "" : "s") + ")" : "Apply",
+        "h3pp-apply", () => processPlan(node, {
+            reason: changes
+                ? ("You changed this job's exclusions / pairings (" + changes + " change"
+                   + (changes === 1 ? "" : "s") + ").")
+                : "You are re-planning this job from scratch (nothing is pending on the widgets).",
+            applyLabel: "Apply - re-plan the job",
+            onConfirmed: () => d.close(),
+        })));
     d.foot.appendChild(refresh);
     d.foot.appendChild(button("Close", "", d.close));
 }
@@ -578,13 +605,15 @@ async function openPanel(node, nameOverride) {
 
 /* ---------------------------------------------------------- process the plan */
 
-// Process Plan re-runs the REAL plan node into its real job_name as a TRUE fresh start: the replace
-// route first WIPES the whole job (plan -> plan_prev.json, the preview and crops, manifest.json, the
-// subject cursor, and the entire passes/ tree), then the node writes a fresh plan with nothing to
-// refuse against. It is destructive (it deletes completed renders) and always confirmed first. The
-// panel's exclusion / pair-override controls call this SAME path the moment you change one, so a
-// change is applied to the job immediately (a quick detect + pair, no render) instead of waiting for
-// a manual Process Plan - which is why changing the subject set clears passes: their indices shift.
+// Apply (the panel's foot button) and the node's own Process Plan button both run this: re-run the
+// REAL plan node into its real job_name as a TRUE fresh start. The replace route first WIPES the
+// whole job (plan -> plan_prev.json, the preview and crops, manifest.json, the subject cursor, and
+// the entire passes/ tree), then the node writes a fresh plan with nothing to refuse against. It is
+// destructive (it deletes completed renders) and always confirmed first. The panel's exclusion /
+// re-pair toggles only edit the node's widgets (PENDING); pressing Apply commits them by running this
+// same path. Changing the subject set clears passes because re-pairing renumbers them, so the old
+// renders cannot be kept - which is exactly why the fingerprint stops pass nodes reading a changed
+// pairing off the job folder at run time.
 
 // The plan node is an output node, so a prompt of just it plus the nodes that FEED it runs it
 // and stops there - no tracker, sampler or render. Walk the plan's link inputs upstream.
