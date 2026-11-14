@@ -633,6 +633,33 @@ function ancestorSubgraph(prompt, rootId) {
     return sub;
 }
 
+// Pull the real node error out of a failed prompt's history. ComfyUI records the run's events on
+// entry.status.messages (older builds used entry.messages / status.status_messages); an
+// execution_error event carries node_id, node_type, exception_type, exception_message and a
+// traceback. Return a short human line - what the node actually said - not generic boilerplate.
+function describeHistoryError(entry) {
+    const events = [].concat(
+        (entry && entry.status && entry.status.messages) || [],
+        (entry && entry.messages) || [],
+        (entry && entry.status && entry.status.status_messages) || []
+    );
+    for (const ev of events) {
+        const kind = Array.isArray(ev) ? ev[0] : (ev && ev.event);
+        const data = Array.isArray(ev) ? ev[1] : ev;
+        if (!data || typeof data !== "object") continue;
+        const msg = data.exception_message || data.message || "";
+        const type = data.exception_type || "";
+        if (kind === "execution_error" || msg || type) {
+            if (!msg && !type) continue;
+            const head = (type ? type + ": " : "") + (msg || "(no message)");
+            const who = data.node_type ? "   [" + data.node_type +
+                (data.node_id === undefined || data.node_id === null ? "" : " #" + data.node_id) + "]" : "";
+            return head + who;
+        }
+    }
+    return (entry && entry.status && entry.status.summary) || "";
+}
+
 async function waitForPrompt(promptId, d) {
     const t0 = Date.now();
     for (;;) {
@@ -648,12 +675,15 @@ async function waitForPrompt(promptId, d) {
         const entry = hist && hist[promptId];
         const status = entry && entry.status;
         if (status && status.status_str === "error") {
-            const msgs = (entry.messages || [])
-                .map((m) => (Array.isArray(m) && m[1] ? JSON.stringify(m[1]) : "")).filter(Boolean);
+            const why = describeHistoryError(entry);
             d.head.textContent = "Process Plan - the re-plan failed";
-            d.body.textContent = msgs.join("\n") || status.summary ||
-                "The plan node reported an error (it may have refused: nothing to plan, or a " +
-                "pairing that seeds from a plate holding no faces).";
+            d.body.textContent = (why ? why + "\n\n" : "") +
+                "The plan node raised an error. Its full message and traceback are printed in the "
+                + "ComfyUI backend console (the black window) and shown on the node when you queue "
+                + "normally. Common causes: nothing to plan (every face switched off, or no face "
+                + "found on either plate at the match frame - lower confidence or check the "
+                + "reference is the same scene), or a pairing that seeds subjects from a plate with "
+                + "no faces (use subject_source=union).";
             d.foot.appendChild(button("Close", "", d.close));
             return false;
         }
