@@ -701,6 +701,61 @@ async function processPlan(node) {
     await openPanel(node, name);
 }
 
+/* ------------------------------------------------------------------ reset run */
+
+// Reset run clears a job's pass bookkeeping (the manifest's pass records + the subject cursor) so
+// the always-next walk starts over at the first subject. It is non-destructive: plan.json, the
+// references, the preview and the saved pass frames stay on disk - a re-run simply overwrites its
+// own frames. The route answers how many completed pass records it dropped, which we report.
+async function resetRun(node) {
+    if (renderRunning()) {
+        const d = dialog("Reset run");
+        showWait(d, node);
+        return;
+    }
+    const wd = w(node, "job_name");
+    const name = wd ? String(wd.value === null || wd.value === undefined ? "" : wd.value).trim() : "";
+    if (!name) {
+        const d = dialog("Reset run - no job_name");
+        d.body.textContent = "This plan node has no job_name, so there is no run to reset. Set "
+            + "job_name on the node (or press Process Plan to write a job folder) first.";
+        d.foot.appendChild(button("Close", "", d.close));
+        return;
+    }
+    const d = dialog("Reset run - " + name);
+    d.msg.textContent = "clearing the pass bookkeeping...";
+    let data;
+    try {
+        const r = await fetch(api.apiURL(ROUTE + "/reset"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ job_name: name }),
+        });
+        data = await r.json().catch(() => ({}));
+    } catch (e) {
+        d.head.textContent = "Reset run - request failed";
+        d.body.textContent = "The reset route was unreachable: " + e;
+        d.foot.appendChild(button("Close", "", d.close));
+        return;
+    }
+    if (data && data.busy) { showWait(d, node); return; }
+    if (!data || !data.ok) {
+        d.head.textContent = "Reset run - refused";
+        d.body.textContent = (data && data.message) || "The reset route returned nothing.";
+        d.foot.appendChild(button("Close", "", d.close));
+        return;
+    }
+    const n = Number(data.cleared || 0);
+    d.head.textContent = "Reset run - done";
+    d.body.textContent = "Run reset. "
+        + (n ? "Cleared " + n + " completed pass record(s). "
+             : "No completed passes were recorded anyway. ")
+        + "Every subject now reads as not-yet-processed, so the next queue starts again at the "
+        + "first subject. The plan, the references and the saved pass frames on disk are untouched "
+        + "- re-running a subject simply overwrites its own frames. Queue the graph again to start.";
+    d.foot.appendChild(button("Close", "", d.close));
+}
+
 /* --------------------------------------------------------------- register */
 
 app.registerExtension({
@@ -713,13 +768,15 @@ app.registerExtension({
             const r = created ? created.apply(this, arguments) : undefined;
             const replan = this.addWidget("button", "Process Plan", null,
                                           () => processPlan(this));
+            const reset = this.addWidget("button", "Reset run", null,
+                                         () => resetRun(this));
             const btn = this.addWidget("button", "Pairing preview", null,
                                        () => openPanel(this));
             // A button holds no value, so it must not be serialised: a slot in widgets_values
             // would reinterpret every saved widget after it (ADR 0002 - the plan node's widget
-            // order is permanent, and this adds no widget to it). Process Plan is added first so
-            // it renders above Pairing preview on the node.
-            for (const b of [replan, btn]) {
+            // order is permanent, and this adds no widget to it). Process Plan then Reset run are
+            // added first so they render above Pairing preview on the node.
+            for (const b of [replan, reset, btn]) {
                 if (b) {
                     b.serialize = false;
                     b.serializeValue = () => undefined;

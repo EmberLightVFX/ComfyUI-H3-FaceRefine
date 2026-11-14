@@ -144,13 +144,12 @@ def test_a_number_the_cap_took_out_is_refused_by_name():
     assert "0, 1" in str(exc.value)
 
 
-def test_the_subject_value_is_a_plain_int_the_plan_cannot_be_read_from_it():
-    """No new widget reads the plan: `subject` is a bare int and `mode` is a fixed direction, so
-    which face the plan actually holds is settled by the plan, not the widget - a capped face stays
-    unselectable because it is simply not in plan_subject_indices."""
+def test_the_subject_select_carries_only_the_plan_and_the_pick():
+    """No widget reads the plan: Subject Select holds only the plan and the clip's own pick, so
+    which face is a subject is settled by the plan, not a control - a capped face stays unselectable
+    because it is simply not in plan_subject_indices."""
     schema = m.H3SubjectSelect.INPUT_TYPES()["required"]
-    assert list(schema) == ["plan", "face_pick", "subject", "mode"]
-    assert schema["subject"][0] == "INT"
+    assert list(schema) == ["plan", "face_pick"]
     plan = _plan(max_subjects=2)
     assert ps.plan_subject_indices(plan) == [0, 1]
     assert 2 not in ps.plan_subject_indices(plan)

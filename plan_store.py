@@ -1513,6 +1513,34 @@ def next_subject(plan, job_dir):
     return None
 
 
+def run_counts(plan, job_dir) -> dict:
+    """How many queues this job still needs - one per subject with no recorded complete pass.
+
+    The plan node prints this so the user knows up front how many times to queue: the number of
+    subjects the plan kept (found faces minus the excluded/ignored ones) is the number of queues a
+    fresh job takes, and each saved pass lowers it by one. ``remaining_indices`` is what still has
+    to run and ``next_index`` is the subject the next queue will take (``None`` when all are done
+    or the plan holds nobody). Reading it never writes anything.
+    """
+    order = plan_subject_indices(plan)
+    done = set(completed_subjects(plan, job_dir)) if job_dir else set()
+    remaining = [index for index in order if index not in done]
+    if job_dir:
+        opened = next_subject(plan, job_dir)
+    else:
+        opened = None
+        for subject in (plan or {}).get("subjects") or []:
+            opened = subject
+            break
+    return {
+        "total": len(order),
+        "complete": len(order) - len(remaining),
+        "remaining": len(remaining),
+        "remaining_indices": remaining,
+        "next_index": None if opened is None else int(opened["index"]),
+    }
+
+
 # ---- the subject-selection cursor -------------------------------------------
 # H3 Subject Select walks the plan one subject per queue. Which subject the walk is
 # sitting on is remembered HERE, in the job folder (the pipeline's memory), so queueing
@@ -1551,6 +1579,30 @@ def write_subject_cursor(job_dir, cursor, seed) -> None:
     os.makedirs(str(job_dir), exist_ok=True)
     with open(subject_cursor_path(job_dir), "w", encoding="utf-8") as fh:
         json.dump({"cursor": int(cursor), "seed": int(seed)}, fh)
+
+
+def reset_run(job_dir) -> dict:
+    """Start a job's subject passes over: clear the recorded pass bookkeeping so every subject
+    reads as not-yet-processed again, which is what the plan node's **Reset run** button does.
+
+    Deliberately non-destructive: it drops only the manifest's pass records and the subject-cursor
+    file - never ``plan.json`` (the pairing), the subject references, the pairing preview, or the
+    saved pass ``frame_*.png`` on disk. Because the walk keys off completion, clearing the records
+    sends the next queue back to the first subject, and re-running any subject simply overwrites its
+    own frames. Returns ``{"cleared": <pass records dropped>, "existed": bool}``.
+    """
+    job = str(job_dir)
+    if not os.path.isdir(job):
+        return {"cleared": 0, "existed": False}
+    manifest = read_manifest(job)
+    passes = manifest.get("passes")
+    cleared = len(passes) if isinstance(passes, dict) else 0
+    manifest["passes"] = {}
+    write_manifest(job, manifest)
+    cursor = subject_cursor_path(job)
+    if os.path.isfile(cursor):
+        os.remove(cursor)
+    return {"cleared": cleared, "existed": True}
 
 
 # ----------------------------------------------------------------------------

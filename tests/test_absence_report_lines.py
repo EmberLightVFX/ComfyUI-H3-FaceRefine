@@ -142,7 +142,7 @@ def test_the_shot_account_needs_no_new_widget_on_either_node():
     assert list(save["required"]) == ["plan", "subject", "stage", "images"]
     assert list(save["optional"]) == ["transform", "chained_from"]
     select = m.H3SubjectSelect.INPUT_TYPES()
-    assert list(select["required"]) == ["plan", "face_pick", "subject", "mode"]
+    assert list(select["required"]) == ["plan", "face_pick"]
     assert not select.get("optional")
 
 
