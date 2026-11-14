@@ -1215,8 +1215,10 @@ The example above (`pairing_preview`'s error box) is that pass-node refusal.
 
 The plan node carries a panel — **Pairing preview** — showing `pairing_preview.png` and, per
 subject, **both** faces side by side: the clip face cut from the match frame (`clip_N.png`) and the
-reference it is conditioned on (`subject_N.png`). A still-only subject has no clip face on the match
-frame, so it shows a placeholder in its place. A pairing can be checked beside the node that made
+reference it is conditioned on (`subject_N.png`). Both are cut at the **job's `crop_factor`** (the
+same framing the tracker will crop with), so the two thumbnails show the subject at the same scale
+and can be compared directly. A still-only subject has no clip face on the match frame, so it shows
+a placeholder in its place. A pairing can be checked beside the node that made
 it instead of by opening the folder in a file browser.
 
 The **Pairing preview** view reads `plan.json`, `pairing_preview.png`, `subject_N.png` and

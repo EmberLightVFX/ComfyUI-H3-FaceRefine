@@ -199,21 +199,21 @@ def _write_reference_png(path, frame, rect) -> tuple[int, int]:
     return int(crop.shape[1]), int(crop.shape[0])
 
 
-def _clip_crop_rect(box, W: int, H: int, pad: float = 0.20):
-    """Turn a clip face's xyxy box into an xywh crop rect for the pairing panel (#9).
+def _clip_crop_rect(box, W: int, H: int, crop_factor: float = None):
+    """Turn a clip face's box into the crop rect the pairing panel shows for it (#9).
 
-    Padded a little and clamped to the frame: an edge-tight box crops the chin and hair off,
-    which reads worse than a hair of background beside the face. Returns None if the box
-    collapses, so a degenerate detection just shows no clip crop rather than a bad slice.
+    Cut at the SAME crop_factor the subject reference was cut at - `plan_store.tracker_rect` in the
+    clip's own pixels - so the clip-face thumb and the reference thumb frame the subject at one
+    scale and can be compared side by side. (The old face-box + small padding read as far more
+    zoomed in than the reference.) `tracker_rect` keeps the canvas aspect, centres on the face and
+    clamps inside the frame; returns None if the crop collapses, so a degenerate detection just
+    shows no clip crop rather than a bad slice.
     """
-    x0, y0, x1, y1 = (float(v) for v in box[:4])
-    bw, bh = x1 - x0, y1 - y0
-    if bw <= 1 or bh <= 1:
-        return None
-    x0, x1 = x0 - bw * pad, x1 + bw * pad
-    y0, y1 = y0 - bh * pad, y1 + bh * pad
-    x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
-    x1, y1 = min(int(W), int(round(x1))), min(int(H), int(round(y1)))
+    if crop_factor is None:
+        crop_factor = plan_store.DEFAULT_CROP_FACTOR
+    x, y, w, h = plan_store.tracker_rect(box, (int(W), int(H)), float(crop_factor))
+    x0, y0 = max(0, int(round(x))), max(0, int(round(y)))
+    x1, y1 = min(int(W), int(round(x + w))), min(int(H), int(round(y + h)))
     if x1 - x0 < 1 or y1 - y0 < 1:
         return None
     return [x0, y0, x1 - x0, y1 - y0]
@@ -808,7 +808,9 @@ class H3MultiFacePlan:
             for subject in plan["subjects"]:
                 box = subject.get("clip_box")
                 if box:
-                    rect = _clip_crop_rect(box, clip_W, clip_H)
+                    # Cut the clip thumb at the crop_factor the reference was cut at (recorded in
+                    # the plan), so the two thumbs frame the subject at the same scale.
+                    rect = _clip_crop_rect(box, clip_W, clip_H, plan_store.plan_crop_factor(plan))
                     if rect is not None:
                         clip_name = f"clip_{int(subject['index'])}.png"
                         _write_reference_png(os.path.join(job, clip_name), images[frame], rect)
