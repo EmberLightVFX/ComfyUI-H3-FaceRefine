@@ -296,6 +296,25 @@ def test_a_correct_explicit_chained_from_is_accepted():
     assert not problems
 
 
+def test_the_multi_face_flow_never_wires_reference_audio_into_h3():
+    """The multi-face flow takes the finished clip's audio from the target clip at assembly and
+    discards H3's generated audio, so conditioning H3 on reference audio does nothing useful here -
+    and a reference audio carried off a silent source clip is a near-empty waveform that crashes the
+    audio VAE ("padded input (6) < kernel 7"). So the multi-face template must not wire any
+    ref_audios socket on its MiniMaxH3ReferenceToVideo. (The single-face templates keep theirs on
+    purpose - different flow, different audio contract.)"""
+    workflow = _load("H3_Face_Refine_Multi_Face.json")
+    wired = []
+    for node in workflow["nodes"]:
+        if node.get("type") != "MiniMaxH3ReferenceToVideo":
+            continue
+        for inp in node.get("inputs", []):
+            if "ref_audio" in inp["name"].lower() and inp.get("link") is not None:
+                wired.append((node["id"], inp["name"]))
+    assert wired == [], f"multi-face template must not wire reference audio, found {wired}"
+
+
+
 
 
 
