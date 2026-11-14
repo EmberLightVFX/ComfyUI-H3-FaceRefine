@@ -163,6 +163,40 @@ def test_process_plan_replaces_the_plan_after_clearing_stale_artifacts(pack, mon
     assert json.loads(prev.read_text(encoding="utf-8"))["inputs"]["unmatched_faces"] == "no_reference"
 
 
+def test_the_plan_node_replans_when_its_plan_file_is_gone(pack, monkeypatch, tmp_path):
+    """ComfyUI's output cache skips run() when a node's inputs are unchanged - but run() is what
+    writes plan.json, so the pairing panel's Process Plan (which deletes plan.json, leaving the
+    inputs otherwise identical) used to re-plan into a folder the cache kept serving stale: the
+    node's cached output came back and no fresh plan was written, and the panel said "no plan yet".
+
+    IS_CHANGED keyed on the plan file's presence busts that: a planned job returns a stable value
+    (stays cached, so the per-subject pass chain never re-detects), while a cleared or never-written
+    plan - or a blank job_name - returns NaN, forcing run() so a plan is (re)written."""
+    import math
+    import plan_store as ps
+
+    plan_cls = pack.NODE_CLASS_MAPPINGS["H3MultiFacePlan"]
+
+    # Blank job_name: the folder derives from images IS_CHANGED is not handed reliably -> re-plan.
+    assert math.isnan(plan_cls.IS_CHANGED(job_name=""))
+
+    # Never-planned job name: nothing on disk -> NaN so run() writes the first plan.
+    assert math.isnan(plan_cls.IS_CHANGED(job_name="never planned"))
+
+    # Plan it, then the node's cache signature is stable: an ordinary queue stays cached.
+    _run(pack, monkeypatch, job_name="cached plan")
+    job = pathlib.Path(ps.job_dir_for(str(tmp_path / "output"), "cached plan"))
+    assert (job / ps.PLAN_FILENAME).is_file()
+    stable = plan_cls.IS_CHANGED(job_name="cached plan")
+    assert stable == 0 and stable == plan_cls.IS_CHANGED(job_name="cached plan")
+
+    # Process Plan clears the plan artifacts: the file is gone, so the value flips to NaN and the
+    # node runs again rather than serving the cached plan whose plan.json no longer exists.
+    ps.clear_plan_artifacts_for_replace(str(job))
+    assert not (job / ps.PLAN_FILENAME).is_file()
+    assert math.isnan(plan_cls.IS_CHANGED(job_name="cached plan"))
+
+
 def test_a_manual_pair_override_repairs_a_wrong_pair_and_makes_it_a_subject(pack, monkeypatch):
     """The middle clip face has no partner in the still, so with the default `leave` it is not a
     subject at all. The pairing panel's re-pairing editor would fix exactly this: a manual `1=s0`
