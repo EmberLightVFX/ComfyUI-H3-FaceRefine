@@ -401,12 +401,14 @@ def test_an_unknown_subject_names_the_choices():
     assert m.subject_label(plan["subjects"][0]) in str(exc.value)
 
 
-# --- the subject walk: INT value + Fixed/Increment/Decrement, remembered in the job ----------
+# --- the subject walk: always the next subject with no saved pass, read from the job ---------
 #
-# run() resolves a NUMBER (not a selector) against a cursor stored in the job folder, so the
-# same graph queueing again advances the subject value and the report shows where it lands. These
-# pin that bookkeeping without a torch/pick harness: narrow + reference are stubbed, and the
-# output root is redirected into tmp_path so nothing ever writes to a real ComfyUI output folder.
+# There is no subject/mode widget. run() reads the job folder's pass manifest and takes the first
+# subject with no completed pass, so queueing the same graph advances one subject per SAVED pass,
+# and a queue that crashes mid-pass is taken again rather than skipped (the self-heal that used to
+# deadlock on Pass Load). narrow, the reference load and the report builder are stubbed here so only
+# the walk is under test; the output root is redirected into tmp_path so nothing writes to a real
+# ComfyUI output folder.
 
 def _walk_plan(job_name="walk job"):
     return {"version": ps.PLAN_VERSION, "match_frame": 0,
@@ -415,9 +417,9 @@ def _walk_plan(job_name="walk job"):
 
 
 def _walk_select(monkeypatch, tmp_path):
-    """H3SubjectSelect with the pick-specific machinery stubbed out: only the subject WALK (the
-    INT value, the mode, the job cursor and the walk note) is under test here, so narrowing, the
-    reference load and the full report builder are replaced with no-ops, and the output root is
+    """H3SubjectSelect with the pick-specific machinery stubbed: only the subject WALK (which
+    subject comes up next from the pass manifest, and the walk note) is under test, so narrowing,
+    the reference load and the full report builder are replaced with no-ops, and the output root is
     redirected into tmp_path so nothing ever writes to a real ComfyUI output folder."""
     monkeypatch.setattr(m, "_output_root", lambda: str(tmp_path / "output"))
     monkeypatch.setattr(m, "narrow_pick_to_subject",
@@ -425,7 +427,7 @@ def _walk_select(monkeypatch, tmp_path):
     monkeypatch.setattr(m, "load_subject_reference",
                         lambda job, chosen: (None, 0, ""))
     # Keep the walk note: the real report builder folds cursor_note into the report, so the stub
-    # returns it and the report assertions below still see where the value lands.
+    # returns it and the report assertions below still see the walk line.
     monkeypatch.setattr(m, "subject_report",
                         lambda *a, **k: k.get("cursor_note", ""))
     return m.H3SubjectSelect()
@@ -435,94 +437,69 @@ def _job(tmp_path, job_name="walk job"):
     return ps.job_dir_for(str(tmp_path / "output"), job_name)
 
 
-def test_increment_walk_advances_only_as_passes_complete(monkeypatch, tmp_path):
-    """The chained model runs one subject per queue and only moves on once that subject's stitched
-    pass is on record - so the walk advances with the manifest, not a blind counter."""
-    plan = _walk_plan()
-    node = _walk_select(monkeypatch, tmp_path)
-    job = _job(tmp_path)
-
-    seen, prevs = [], []
-    for _ in range(3):
-        r = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)
-        seen.append(r[3])          # subject_index
-        prevs.append(r[4])         # previous_subject (the chain feed)
-        _write_manifest(job, {str(i): {"complete": True} for i in seen})   # each pass now saved
-    assert seen == [0, 1, 2]
-    assert prevs == [-1, 0, 1]      # each builds on the one before it
-
-
-def test_increment_does_not_outrun_an_unsaved_pass(monkeypatch, tmp_path):
-    """A queue that crashes after this node advanced the cursor must be retried, not skipped: with
-    no pass ever saved, the walk stays on subject 0 instead of running subject 1 onto a chain that
-    never existed (which is exactly the Pass Load error it used to deadlock on)."""
-    plan = _walk_plan()
-    node = _walk_select(monkeypatch, tmp_path)
-    seen = [node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[3] for _ in range(3)]
-    assert seen == [0, 0, 0]
-
-
-def test_the_walk_resumes_past_a_saved_subject_but_not_past_a_missing_one(monkeypatch, tmp_path):
-    """Subject 1's pass is on record but subject 0's is not: the chain cannot honour that, so the
-    walk goes back to the earliest subject with no pass, then moves up only as passes land."""
+def test_next_is_the_first_subject_with_no_saved_pass(monkeypatch, tmp_path):
+    """Nothing saved yet: the walk sits on subject 0. Only a queue that SAVES a pass (records it
+    complete in the manifest) moves it on - one queue per subject, with no widget to drive it."""
     plan = _walk_plan()
     node = _walk_select(monkeypatch, tmp_path)
     job = _job(tmp_path)
     os.makedirs(str(job), exist_ok=True)
-    _write_manifest(job, {"1": {"complete": True}})      # 1 done, 0 missing (an out-of-order job)
 
-    assert node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[3] == 0   # jump to seed 0
-    assert node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[3] == 0   # continued: 0 still open
+    assert [node.run(plan, "PICK")[3] for _ in range(3)] == [0, 0, 0]
+
+    _write_manifest(job, {"0": {"complete": True}})
+    assert node.run(plan, "PICK")[3] == 1
+    _write_manifest(job, {"0": {"complete": True}, "1": {"complete": True}})
+    assert node.run(plan, "PICK")[3] == 2
 
 
-def test_the_report_shows_the_current_id_and_where_it_lands(monkeypatch, tmp_path):
+def test_the_walk_goes_back_to_the_earliest_subject_with_no_pass(monkeypatch, tmp_path):
+    """Subject 1's pass is on record but subject 0's is not - an out-of-order or crashed job. The
+    chain cannot honour that, so the walk returns to the earliest subject with no pass."""
     plan = _walk_plan()
     node = _walk_select(monkeypatch, tmp_path)
     job = _job(tmp_path)
+    os.makedirs(str(job), exist_ok=True)
+    _write_manifest(job, {"1": {"complete": True}})
 
-    first = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[5]
+    assert node.run(plan, "PICK")[3] == 0
+    assert node.run(plan, "PICK")[3] == 0
+
+
+def test_the_report_shows_the_current_id_and_the_remaining_queues(monkeypatch, tmp_path):
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+    job = _job(tmp_path)
+    os.makedirs(str(job), exist_ok=True)
+
+    first = node.run(plan, "PICK")[5]
     assert "you are on subject 0 of 3" in first
-    assert "advances to 1" in first
-    assert "taken again until its pass is saved" in first     # the self-heal is stated
+    assert "2 still to run after this one" in first
     _write_manifest(job, {"0": {"complete": True}})
-    second = node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)[5]
-    assert "you are on subject 1 of 3" in second and "advances to 2" in second
+    second = node.run(plan, "PICK")[5]
+    assert "you are on subject 1 of 3" in second
+    assert "1 still to run after this one" in second
 
 
-def test_fixed_value_holds_one_subject_across_queues(monkeypatch, tmp_path):
-    plan = _walk_plan()
-    node = _walk_select(monkeypatch, tmp_path)
-
-    seen = [node.run(plan, "PICK", 1, m.SUBJECT_MODE_FIXED)[3] for _ in range(3)]
-    assert seen == [1, 1, 1]
-    assert ps.read_subject_cursor(_job(tmp_path))["cursor"] == 1
-
-
-def test_decrement_value_walks_backwards(monkeypatch, tmp_path):
-    plan = _walk_plan()
-    node = _walk_select(monkeypatch, tmp_path)
-
-    seen = [node.run(plan, "PICK", 2, m.SUBJECT_MODE_DECREMENT)[3] for _ in range(2)]
-    assert seen == [2, 1]
-    report = node.run(plan, "PICK", 2, m.SUBJECT_MODE_DECREMENT)[5]
-    assert "steps back to" in report
-
-
-def test_a_different_number_jumps_to_that_subject(monkeypatch, tmp_path):
-    """Changing the widget value itself (not re-queueing the same value) is an explicit jump, not
-    a continuation of the stored walk."""
-    plan = _walk_plan()
-    node = _walk_select(monkeypatch, tmp_path)
-    node.run(plan, "PICK", 0, m.SUBJECT_MODE_INCREMENT)          # walk now at cursor 1, seed 0
-    jumped = node.run(plan, "PICK", 2, m.SUBJECT_MODE_INCREMENT)[3]
-    assert jumped == 2                                            # jumped, did not resume at 1
-
-
-def test_a_number_the_plan_does_not_hold_is_refused(monkeypatch, tmp_path):
-    plan = _walk_plan()
+def test_an_empty_plan_is_refused(monkeypatch, tmp_path):
+    plan = {"version": ps.PLAN_VERSION, "match_frame": 0, "subjects": [],
+            "run": {"job_name": "walk job"}}
     node = _walk_select(monkeypatch, tmp_path)
     with pytest.raises(ValueError) as exc:
-        node.run(plan, "PICK", 7, m.SUBJECT_MODE_INCREMENT)
-    assert "subject 7 is not one this plan holds" in str(exc.value)
-    assert "0, 1, 2" in str(exc.value)
+        node.run(plan, "PICK")
+    assert "no subjects" in str(exc.value)
+
+
+def test_when_every_pass_is_saved_the_walk_points_at_reset_run(monkeypatch, tmp_path):
+    """Every subject done: rather than invent a generation, it refuses and names Reset run."""
+    plan = _walk_plan()
+    node = _walk_select(monkeypatch, tmp_path)
+    job = _job(tmp_path)
+    os.makedirs(str(job), exist_ok=True)
+    _write_manifest(job, {str(i): {"complete": True} for i in range(3)})
+
+    with pytest.raises(ValueError) as exc:
+        node.run(plan, "PICK")
+    assert "already has a completed pass" in str(exc.value)
+    assert "Reset run" in str(exc.value)
 

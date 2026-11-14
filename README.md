@@ -1058,8 +1058,10 @@ subject, so it has to be visible at the node that made it.
 |---|---|
 | `plan` | the `H3FACEPLAN` output feeds **H3 Subject Select**, **H3 Pass Save**, **H3 Pass Load** and **H3 Multi-Face Composite**. It carries the job folder's name, which is why none of those nodes has a `job_name` widget of its own — and why two jobs in one output tree cannot read each other's references. |
 | `preview` | both plates side by side at the match frame, every face numbered, subjects outlined in their palette colour, excluded faces slashed red, faces with no partner marked. Wire it to any image viewer, or read it off the node. |
-| `report` | printed on the node: who is in the job, what it costs, what was written where, and every decision the plan made about faces it could not pair. |
-| `subject_count` | how many passes this job is. Wire it anywhere you want the number, and check it against the cost line before queueing. |
+| `report` | printed on the node: who is in the job, what it costs, what was written where, every decision the plan made about faces it could not pair, and a **passes** line for a job that has started — how many subjects (queues) are still to run and which subject the next queue takes. |
+| `subject_count` | how many passes this job is — the number of queues a fresh job takes (found faces minus the ignored ones). Wire it anywhere you want the number, and check it against the cost line before queueing. |
+
+**Buttons on the node:** **Process Plan** re-runs this node to *replace* the plan (it clears the job's own stale plan artifacts first; the passes must then be re-run). **Pairing preview** opens the read-only panel over the job folder. **Reset run** clears only the **pass bookkeeping** (the manifest's pass records and the subject walk) so the always-next walk starts over at the first subject — it pops a note saying how many completed passes it cleared, and never touches `plan.json`, the references, the preview or the saved pass frames (a re-run simply overwrites its own frames).
 
 ---
 
@@ -1263,8 +1265,14 @@ clip's own pick payload carries a box for every frame, and the node narrows the 
 Detection therefore stays exactly once in your graph — the loader did it, this node reads it, and
 the tracker that follows runs no detection pass at all.
 
-One branch of the graph per **pass**. Queue it once per subject, changing only the `subject` widget —
-or leave it and set **mode** to Increment Value - the default - and let the **pass manifest** walk the cursor forward for you, so each queue takes the next subject.
+One branch of the graph per **pass** — but you build only ONE chain. **H3 Subject Select** always
+takes the **next subject with no saved pass**, so you queue the same graph once per person and it
+walks the plan for you: there is no `subject` value or `mode` to set. The walk *is* the job folder's
+**pass manifest** — it moves on only once a subject's pass is saved, and a queue that crashes
+mid-pass is taken again rather than skipped, so the chain never composites onto a subject that was
+never run. When every subject is done the node refuses and points at **Reset run** on the **H3
+Multi-Face Plan** node, which clears the pass bookkeeping (never the pairing or the saved frames) and
+starts the whole job over from the first subject.
 
 **Inputs**
 
@@ -1272,8 +1280,6 @@ or leave it and set **mode** to Increment Value - the default - and let the **pa
 |---|---|---|
 | `plan` | - | The subject plan from **H3 Multi-Face Plan**: who the subjects are, which face in the clip each one is, which face in the still became their subject reference, and whether they were paired at all. It records the match frame's boxes only, so it cannot name this subject in the other shots on its own — that is what `face_pick` is for. |
 | `face_pick` | - | The clip's own pick payload, from the same **H3 Load Video + Face Select** the images come from: every frame's boxes, confidences and shot boundaries. Its picks are replaced with this subject's; the boxes pass through untouched. **Do not resize, crop or trim between the loader and this node** — every box would land in the wrong place. |
-| `subject` | `0` | Which subject this pass refines, as a NUMBER. With the default mode (Increment Value) this is the subject you are on NOW: the walk position lives in the job folder, so queueing the same graph again advances through the plan with nothing to edit, and the report always shows this ID and where the next queue lands. Put a number here to JUMP straight to that subject - to start the walk somewhere specific, or to re-run one person. A number the plan does not hold is refused and names the ones it does. |
-| `mode` | `Increment Value` | What happens to the subject value after each queue, and the report shows where it lands: **Increment Value** (default) walks the plan one subject per queue, but chained-safe - it only moves on once a subject's stitched pass is recorded, and a queue that crashes mid-pass is retried (it snaps back to the earliest subject still missing a pass) rather than advancing past it, so the chain never composites onto a subject that was never run; **Decrement Value** steps back to the previous subject (-1), e.g. to redo an earlier person; **Fixed Value** holds this subject and runs it again each queue (re-render one subject without moving). |
 
 **Outputs**
 
@@ -1282,7 +1288,8 @@ or leave it and set **mode** to Increment Value - the default - and let the **pa
 | `face_pick` | **H3 Face Track + Crop → `face_pick`**, and on to **H3 Pass Save** if you checkpoint the crops. |
 | `subject_reference` | H3's `ref_image_*` slots, and **nowhere else**. For a whole-still subject it is the entire reference still. A too-small crop is lifted to H3's minimum reference size (128px): H3 VAE-encodes a reference at /16 and a DiT patch conv needs a 7-wide latent, so a smaller one crashes the node; new plans cut real pixels up to that floor, and a crop already on disk is enlarged to it (the report says so). |
 | `reference_exists` | `1` / `0`. `0` means this subject has no subject reference — a normal state of a plan under `unmatched_faces=no_reference`, not an error, and it means nothing is wired into the H3 node's reference slots. |
-| `subject_index` | **H3 Pass Save** and **H3 Pass Load → `subject`**, so the pass and the selection can never disagree. |
+| `subject_index` | **H3 Pass Save → `subject`** — the subject this pass is refining, so the saved pass and the selection can never disagree. |
+| `previous_subject` | **H3 Pass Load → `subject`** *and* **H3 Pass Save → `chained_from`**. The subject this pass composites ONTO: `-1` for the FIRST subject in plan order (so Pass Load returns its `no_previous` target clip), otherwise the previous subject. From the plan, not a per-copy widget — this is what lets one reusable chain serve any number of subjects. |
 | `report` | who was chosen, which frame each shot locks onto, where the reference came from, and this subject's **shot account**. |
 
 > **Leave `identity_reference` unwired.** Each subject's **identity anchor** is rebuilt from their

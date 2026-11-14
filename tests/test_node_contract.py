@@ -23,7 +23,7 @@ WIDGET_ORDER = ["detector", "confidence", "match_frame", "subject_source",
                 "match_tolerance", "excluded_faces", "max_subjects", "job_name",
                 "unmatched_faces", "crop_factor", "pair_overrides"]
 
-SUBJECT_WIDGET_ORDER = ["subject", "mode"]
+SUBJECT_WIDGET_ORDER = []
 
 
 def test_exactly_one_new_custom_type_lands_with_the_feature():
@@ -157,17 +157,16 @@ def test_the_subject_inputs_are_a_plan_and_the_clip_s_own_pick():
         assert banned not in schema["required"]
 
 
-def test_the_subject_value_is_an_int_and_the_mode_is_the_direction_combo():
+def test_the_subject_select_has_no_subject_or_mode_widget():
     schema = m.H3SubjectSelect.INPUT_TYPES()["required"]
-    # subject is now a plain INT (the ID you are on), not a dropdown - the walk moves it at run
-    # time and the report shows it, so the widget never has to enumerate the plan's subjects.
-    assert schema["subject"][0] == "INT"
-    assert schema["subject"][1]["default"] == 0
-    assert schema["subject"][1]["min"] == 0
-    # mode picks what happens to the value after each queue; Increment is the default.
-    assert schema["mode"][0] == [m.SUBJECT_MODE_FIXED, m.SUBJECT_MODE_INCREMENT,
-                                 m.SUBJECT_MODE_DECREMENT]
-    assert schema["mode"][1]["default"] == m.SUBJECT_MODE_INCREMENT
+    # Subject Select always processes the next subject with no saved pass; there is no subject
+    # value and no mode to set. The walk is the job folder's pass manifest, and Reset run on the
+    # plan node restarts it - so this node carries only the plan and the clip's own pick.
+    assert list(schema) == ["plan", "face_pick"]
+    for gone in ("subject", "mode"):
+        assert gone not in schema
+    # The run signature matches the schema exactly (no subject/mode parameter left over).
+    assert list(inspect.signature(m.H3SubjectSelect.run).parameters) == ["self", "plan", "face_pick"]
 
 
 def test_the_subject_run_takes_its_inputs_in_schema_order():

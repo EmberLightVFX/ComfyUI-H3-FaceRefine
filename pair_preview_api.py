@@ -10,23 +10,27 @@ Read-only is the whole design, and it is what keeps this safe:
 
 * nothing here detects, crops, pairs or re-decides anything. The panel cannot disagree with the
   graph, because it is the graph's own output;
-* the panel never authors or re-decides a pairing. It can do two things to a job, and neither
-  makes it a source of truth: a per-face toggle edits only the plan node's own typed
+* the panel never authors or re-decides a pairing. It can do three things to a job, and none of
+  them makes it a source of truth: a per-face toggle edits only the plan node's own typed
   ``excluded_faces`` widget (this module only reports each face's widget token, `exclude_token`),
-  and a "replace" action clears one job's stale PLAN artifacts so the plan node's OWN re-run can
-  overwrite them. It never writes a plan, a crop, a pairing or a pass stage - the plan node is the
-  only thing that decides and writes the pairing. See ``clear_plan_artifacts_for_replace``.
-  The interactive re-pairing editor is still a later ticket;
+  a "replace" action clears one job's stale PLAN artifacts so the plan node's OWN re-run can
+  overwrite them, and a "reset" action clears one job's pass BOOKKEEPING (the manifest's pass
+  records and the subject walk) so the walk starts over. None of them writes a plan, a crop, a
+  pairing or a pass stage's frames - the plan node is the only thing that decides and writes the
+  pairing, and the pass nodes write their own stages. See ``clear_plan_artifacts_for_replace`` and
+  ``reset_run``. The interactive re-pairing editor is still a later ticket;
 * the images come back as ComfyUI's own ``/view`` URLs into the output folder. No new static
   file serving is invented here.
 
-Two routes share one namespace. ``/h3_facerefine/pair_preview`` (GET) is read-only and backed by
+Three routes share one namespace. ``/h3_facerefine/pair_preview`` (GET) is read-only and backed by
 one data function, `preview_state`, importable and testable without a server, which returns a
 state instead of raising when there is no plan, because "no plan yet for this job_name" is the
-normal state of a node nobody has queued. ``/h3_facerefine/pair_preview/replace`` (POST) is the
-only write action: for one job_name it clears that job's plan-node artifacts (plan.json to
-``plan_prev.json``, the preview, and the subject/clip crops) so the plan node can re-run into the
-same name and REPLACE the plan; it refuses while a render runs and never touches pass stages.
+normal state of a node nobody has queued. ``/h3_facerefine/pair_preview/replace`` (POST) clears one
+job's plan-node artifacts (plan.json to ``plan_prev.json``, the preview, and the subject/clip crops)
+so the plan node can re-run into the same name and REPLACE the plan. ``/h3_facerefine/pair_preview/reset``
+(POST) clears one job's pass BOOKKEEPING (the manifest's pass records and the subject-cursor file)
+so the always-next walk starts over; it is non-destructive to plan.json, the references, the preview
+and the saved pass frames. Both writes refuse while a render runs and neither authors a pairing.
 
 The one busy rule the panel keeps is the picker's: while a prompt is executing, it refuses. The
 reason is not the cost of reading a JSON file - it is that a panel open over a half-written job
@@ -50,6 +54,11 @@ PREVIEW_ROUTE = "/h3_facerefine/pair_preview"
 # The panel's one write action: clear a job's stale plan artifacts so the plan node can re-run
 # into the same job_name and replace the plan. Separate path so the read route stays read-only.
 REPLACE_ROUTE = PREVIEW_ROUTE + "/replace"
+
+# The panel's second (and only other) write action: reset a job's run - clear the pass bookkeeping
+# (the manifest's pass records and the subject cursor) so the walk starts over at the first subject.
+# A separate path so the read route stays read-only; like replace it never touches plan.json.
+RESET_ROUTE = PREVIEW_ROUTE + "/reset"
 
 # Same rule the face picker enforces, same reason: while the queue is running, refuse.
 BUSY_MESSAGE = (
@@ -432,3 +441,35 @@ def register():
         return web.json_response({"ok": True, "status": "cleared", "job_name": name,
                                   "replaced": res["existed"], "cleared": res["cleared"],
                                   "prev": res["prev"], "job": job}, status=200)
+
+    @routes.post(RESET_ROUTE)
+    async def _reset_route(request):
+        """Start one job's subject passes over: clear the pass bookkeeping so the walk restarts.
+
+        The panel's other write action, and non-destructive: it drops only the manifest's pass
+        records and the subject-cursor file (plan_store.reset_run), so every subject reads as
+        not-yet-processed and the next queue takes the first one again. It never touches plan.json
+        (the pairing), the references, the preview or the saved pass frames - re-running a subject
+        overwrites its own frames. Refuses while a render is running, like the other routes.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        name = (body or {}).get("job_name", "")
+        if render_running():
+            message = BUSY_MESSAGE
+            return web.json_response({"ok": False, "status": "busy", "busy": True,
+                                      "error": message, "message": message, "job_name": name,
+                                      "reset": False}, status=200)
+        try:
+            job = plan_store.job_dir_for(_output_root(), name)
+            res = plan_store.reset_run(job)
+        except Exception as exc:            # empty/illegal job_name, or a folder we cannot reach
+            message = str(exc)
+            return web.json_response({"ok": False, "status": "error", "error": message,
+                                      "message": message, "job_name": name,
+                                      "reset": False}, status=200)
+        return web.json_response({"ok": True, "status": "reset", "job_name": name,
+                                  "reset": True, "cleared": res["cleared"],
+                                  "existed": res["existed"], "job": job}, status=200)

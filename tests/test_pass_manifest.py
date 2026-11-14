@@ -219,6 +219,58 @@ def test_an_older_job_that_declared_nothing_reports_the_gap(tmp_path):
     assert check["wrong"] == []
 
 
+# --- run_counts + reset_run: "how many queues do I need" and "start the run over" ----------
+
+def test_run_counts_says_how_many_queues_a_fresh_job_needs(tmp_path):
+    job = str(tmp_path / "job")
+    plan = _plan(0, 1, 2)
+    assert ps.run_counts(plan, job) == {"total": 3, "complete": 0, "remaining": 3,
+                                        "remaining_indices": [0, 1, 2], "next_index": 0}
+
+
+def test_run_counts_lowers_remaining_as_passes_complete(tmp_path):
+    job = str(tmp_path / "job")
+    plan = _plan(0, 1, 2)
+    ps.record_pass_stage(job, 0, "stitched", {"frames": 1})
+    ps.record_pass_stage(job, 2, "stitched", {"frames": 1})    # out of order: 0 and 2 done
+    counts = ps.run_counts(plan, job)
+    assert counts["total"] == 3 and counts["complete"] == 2 and counts["remaining"] == 1
+    assert counts["remaining_indices"] == [1]
+    assert counts["next_index"] == 1
+
+
+def test_run_counts_when_the_whole_job_is_done(tmp_path):
+    job = str(tmp_path / "job")
+    plan = _plan(0, 1, 2)
+    for i in range(3):
+        ps.record_pass_stage(job, i, "stitched", {"frames": 1})
+    counts = ps.run_counts(plan, job)
+    assert counts["remaining"] == 0 and counts["remaining_indices"] == []
+    assert counts["next_index"] is None
+
+
+def test_reset_run_clears_the_pass_bookkeeping_not_the_pairing(tmp_path):
+    job = str(tmp_path / "job")
+    plan = _plan(0, 1, 2)
+    ps.write_plan(job, plan)                                   # the pairing survives a reset
+    for i in range(3):
+        ps.record_pass_stage(job, i, "stitched", {"frames": 1})
+    ps.write_subject_cursor(job, 3, 0)                         # a walk left mid-job
+    assert ps.run_counts(plan, job)["remaining"] == 0
+
+    res = ps.reset_run(job)
+    assert res == {"cleared": 3, "existed": True}
+    # Every subject reads as not-yet-processed again, and the walk starts at the first.
+    assert ps.run_counts(plan, job) == {"total": 3, "complete": 0, "remaining": 3,
+                                        "remaining_indices": [0, 1, 2], "next_index": 0}
+    assert ps.read_subject_cursor(job) is None
+    assert os.path.isfile(ps.plan_path(job))                   # plan.json untouched
+
+
+def test_reset_run_on_a_missing_job_is_harmless(tmp_path):
+    assert ps.reset_run(str(tmp_path / "nope")) == {"cleared": 0, "existed": False}
+
+
 def test_the_crop_positions_round_trip_with_the_tracker_s_shapes_back(tmp_path):
     """`crops.json` is readable JSON that a resumed pass can stitch from - including the
     tuples the tracker built, which JSON would otherwise turn back into lists."""
