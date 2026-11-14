@@ -185,7 +185,6 @@
           "name": "audio",
           "type": "AUDIO",
           "links": [
-            66,
             73,
             91
           ]
@@ -1469,7 +1468,7 @@
           "name": "ref_audios.ref_audio_0",
           "shape": 7,
           "type": "AUDIO",
-          "link": 66
+          "link": null
         },
         {
           "name": "ref_audios.ref_audio_1",
@@ -2668,14 +2667,6 @@
       30,
       2,
       "VAE"
-    ],
-    [
-      66,
-      1,
-      1,
-      30,
-      8,
-      "AUDIO"
     ],
     [
       67,
